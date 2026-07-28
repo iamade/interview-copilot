@@ -18,6 +18,7 @@ class AudioCaptureService {
   private mediaRecorder: MediaRecorder | null = null;
   private audioChunks: Blob[] = [];
   private isCapturing = false;
+  private startingCapture = false;
   private onTranscription: TranscriptionCallback | null = null;
   private speechRecognition: any = null;
   private whisperApiKey: string | null = null;
@@ -26,6 +27,19 @@ class AudioCaptureService {
   private whisperEndpoint: string = 'http://localhost:18799/v1/audio/transcriptions';
   private transcriptionMode: 'browser' | 'whisper' = 'whisper';
   private chunkInterval: ReturnType<typeof setInterval> | null = null;
+  // Real-time audio level metering via Web Audio API. Lets the UI show
+  // whether system audio is actually being captured (vs. silent / blocked).
+  private audioContext: AudioContext | null = null;
+  private analyser: AnalyserNode | null = null;
+  private analyserBuffer: Uint8Array | null = null;
+  private levelRAF: number | null = null;
+  private levelListeners: Set<(level: number) => void> = new Set();
+  // Track total seconds of silence while capturing — emit a warning if the
+  // user is "listening" but no actual audio is flowing (e.g. wrong output
+  // device, or system audio loopback not active).
+  private silenceAccumMs = 0;
+  private lastLevelReportTs = 0;
+  private silenceListeners: Set<(silentSeconds: number) => void> = new Set();
 
   /**
    * Capture system audio through getDisplayMedia. Electron's main-process
@@ -246,9 +260,35 @@ class AudioCaptureService {
   private startWhisperTranscription(): void {
     if (!this.mediaStream) return;
 
-    this.mediaRecorder = new MediaRecorder(this.mediaStream, {
-      mimeType: 'audio/webm;codecs=opus',
-    });
+    // Pick the best supported audio mimeType — Safari won't take webm/opus,
+    // Chrome may not have opus always available, etc. Fall back gracefully.
+    const preferredTypes = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/ogg;codecs=opus',
+      'audio/mp4;codecs=mp4a.40.2',
+    ];
+    const supportedType =
+      preferredTypes.find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    const recorderOptions: MediaRecorderOptions = supportedType ? { mimeType: supportedType } : {};
+    try {
+      this.mediaRecorder = new MediaRecorder(this.mediaStream, recorderOptions);
+    } catch (e) {
+      console.error(
+        '[AudioService] MediaRecorder construction failed; falling back to defaults:',
+        e
+      );
+      this.mediaRecorder = new MediaRecorder(this.mediaStream);
+    }
+    console.log(
+      '[AudioService] MediaRecorder constructed; mimeType=',
+      this.mediaRecorder.mimeType || '(default)'
+    );
+
+    // Spin up the audio-level analyser so the UI can show whether the
+    // captured stream actually contains audio (or is silent due to wrong
+    // output device, denied loopback permission, etc.).
+    this.setupAudioAnalyser();
 
     // When stop() is called, ondataavailable fires with the complete recording.
     // We send it to Whisper, then restart recording for the next chunk.
@@ -360,6 +400,8 @@ class AudioCaptureService {
       this.mediaStream = null;
     }
 
+    this.teardownAudioAnalyser();
+
     this.audioChunks = [];
     console.log('[AudioService] Capture stopped');
   }
@@ -367,6 +409,101 @@ class AudioCaptureService {
   isActive(): boolean {
     return this.isCapturing;
   }
+
+  // ── Audio-level metering (drives the level meter in InterviewMode) ──
+
+  /** Subscribe to real-time audio level updates (0 = silence, 1 = loud).
+   *  Returns an unsubscribe function. */
+  addLevelListener(listener: (level: number) => void): () => void {
+    this.levelListeners.add(listener);
+    return () => {
+      this.levelListeners.delete(listener);
+    };
+  }
+
+  /** Subscribe to running-silence alerts. `silentSeconds` is the cumulative
+   *  seconds of near-silence observed since capture started. Used to flag
+   *  a stuck/silent capture to the user. */
+  addSilenceListener(listener: (silentSeconds: number) => void): () => void {
+    this.silenceListeners.add(listener);
+    return () => {
+      this.silenceListeners.delete(listener);
+    };
+  }
+
+  private setupAudioAnalyser(): void {
+    if (!this.mediaStream) return;
+    try {
+      const AudioCtor: typeof AudioContext | undefined =
+        (window as any).AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtor) {
+        console.warn('[AudioService] AudioContext not available — level meter disabled');
+        return;
+      }
+      this.audioContext = new AudioCtor();
+      // Resume on creation — some browsers start suspended.
+      if (this.audioContext.state === 'suspended') {
+        this.audioContext.resume().catch(() => {});
+      }
+      const source = this.audioContext.createMediaStreamSource(this.mediaStream);
+      this.analyser = this.audioContext.createAnalyser();
+      this.analyser.fftSize = 512;
+      this.analyserBuffer = new Uint8Array(this.analyser.fftSize);
+      source.connect(this.analyser);
+      this.silenceAccumMs = 0;
+      this.lastLevelReportTs = performance.now();
+      this.sampleAudioLevel();
+    } catch (e) {
+      console.warn('[AudioService] Failed to set up audio analyser:', e);
+    }
+  }
+
+  private teardownAudioAnalyser(): void {
+    if (this.levelRAF !== null) {
+      cancelAnimationFrame(this.levelRAF);
+      this.levelRAF = null;
+    }
+    if (this.audioContext) {
+      this.audioContext.close().catch(() => {});
+      this.audioContext = null;
+    }
+    this.analyser = null;
+    this.analyserBuffer = null;
+    // Push a final "0" so any UI meter settles to zero immediately
+    for (const l of this.levelListeners) l(0);
+    for (const s of this.silenceListeners) s(0);
+    this.silenceAccumMs = 0;
+  }
+
+  private sampleAudioLevel = (): void => {
+    if (!this.analyser || !this.analyserBuffer || !this.isCapturing) return;
+    this.analyser.getByteTimeDomainData(this.analyserBuffer);
+    let sum = 0;
+    for (let i = 0; i < this.analyserBuffer.length; i++) {
+      const v = (this.analyserBuffer[i] - 128) / 128;
+      sum += v * v;
+    }
+    const rms = Math.sqrt(sum / this.analyserBuffer.length);
+    // Normalize: speech typically 0.02–0.3 RMS, scale so normal speech fills ~50–80%.
+    const normalized = Math.min(1, rms * 5);
+
+    for (const l of this.levelListeners) l(normalized);
+
+    // Track sustained silence
+    const now = performance.now();
+    const dt = now - this.lastLevelReportTs;
+    this.lastLevelReportTs = now;
+    if (normalized < 0.01) {
+      this.silenceAccumMs += dt;
+      for (const s of this.silenceListeners) s(this.silenceAccumMs / 1000);
+    } else if (this.silenceAccumMs > 0) {
+      // Speech detected — reset silence accumulator
+      this.silenceAccumMs = 0;
+      for (const s of this.silenceListeners) s(0);
+    }
+
+    this.levelRAF = requestAnimationFrame(this.sampleAudioLevel);
+  };
 }
 
 export const audioService = new AudioCaptureService();

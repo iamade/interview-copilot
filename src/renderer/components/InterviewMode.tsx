@@ -17,6 +17,8 @@ interface Props {
   onAnswerThis: () => void;
   onClearTranscript: () => void;
   fontSize: number;
+  audioLevel?: number;
+  audioSilentSeconds?: number;
 }
 
 export default function InterviewMode({
@@ -32,6 +34,8 @@ export default function InterviewMode({
   onAnswerThis,
   onClearTranscript,
   fontSize,
+  audioLevel = 0,
+  audioSilentSeconds = 0,
 }: Props) {
   const [manualInput, setManualInput] = useState('');
   const [showHistory, setShowHistory] = useState(false);
@@ -107,13 +111,39 @@ export default function InterviewMode({
         <div className="rounded-lg bg-gray-800/40 border border-gray-700/30 fade-in overflow-hidden">
           <div className="px-3 py-2">
             <div className="text-[9px] text-gray-500 mb-1 uppercase tracking-wider flex items-center gap-2">
-              <span>Hearing interviewer (system audio)...</span>
-              <div className="flex items-center gap-0.5">
-                <div className="w-1 h-2 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '0ms' }} />
-                <div className="w-1 h-3 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '150ms' }} />
-                <div className="w-1 h-2 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '300ms' }} />
-              </div>
+              <span>Hearing interviewer (system audio)</span>
             </div>
+            {/* Real audio-level meter — driven by the AudioContext analyser
+                in audioService. If the bar stays flat for 6+ seconds, the
+                capture is silent (wrong output device / loopback denied). */}
+            <div className="flex items-center gap-2 mb-2">
+              <div className="flex-1 h-1.5 bg-gray-700/80 rounded-full overflow-hidden">
+                <div
+                  className="h-full transition-[width] duration-75 ease-out rounded-full"
+                  style={{
+                    width: `${Math.min(100, Math.max(2, audioLevel * 100))}%`,
+                    background: `linear-gradient(to right, ${
+                      audioLevel > 0.5
+                        ? '#10b981, #facc15, #f97316, #ef4444'
+                        : audioLevel > 0.1
+                        ? '#10b981, #facc15'
+                        : '#6b7280'
+                    })`,
+                  }}
+                />
+              </div>
+              <span className="text-[9px] text-gray-500 font-mono w-10 text-right tabular-nums">
+                {Math.round(audioLevel * 100)}%
+              </span>
+            </div>
+            {audioSilentSeconds > 6 && (
+              <div className="text-[9px] text-amber-400 mb-2 leading-snug">
+                ⚠ No audio detected for {Math.round(audioSilentSeconds)}s. Check that
+                <span className="text-amber-300"> Screen & System Audio Recording</span>
+                {' '}is on for Interview Copilot in System Settings → Privacy & Security,
+                and that your call's audio is routed through your Mac (not just Bluetooth headphones).
+              </div>
+            )}
             <div className="text-gray-300 text-xs leading-relaxed min-h-[20px] max-h-[80px] overflow-y-auto">
               {currentTranscript || <span className="text-gray-600 italic">Waiting for speech...</span>}
             </div>
@@ -220,13 +250,31 @@ export default function InterviewMode({
       {!suggestedAnswer && !isGenerating && isListening && !currentTranscript && (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-xs gap-2">
           <div className="flex items-center gap-1">
-            <div className="w-1 h-3 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '0ms' }} />
-            <div className="w-1 h-4 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '150ms' }} />
-            <div className="w-1 h-2 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '300ms' }} />
-            <div className="w-1 h-5 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '450ms' }} />
-            <div className="w-1 h-3 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '600ms' }} />
+            {[0.2, 0.4, 0.7, 1.0, 0.5].map((mult, i) => {
+              // Bars scale with the actual audio level — silent capture → all bars small.
+              const minH = 6;
+              const maxH = 22;
+              const h = Math.max(
+                minH,
+                Math.min(maxH, minH + (maxH - minH) * Math.min(1, audioLevel * 5) * mult)
+              );
+              return (
+                <div
+                  key={i}
+                  className="w-1 rounded-full transition-[height] duration-75"
+                  style={{
+                    height: `${h}px`,
+                    backgroundColor: audioLevel > 0.05 ? '#f87171' : '#4b5563',
+                  }}
+                />
+              );
+            })}
           </div>
-          <div>Listening to system audio...</div>
+          <div>
+            {audioSilentSeconds > 6
+              ? <span className="text-amber-400">No audio detected — check permissions</span>
+              : 'Listening to system audio...'}
+          </div>
           <div className="text-[10px] text-gray-700">Tap "Answer This" when the interviewer finishes a question</div>
         </div>
       )}

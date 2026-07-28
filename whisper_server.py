@@ -14,6 +14,13 @@ Env overrides:
   WHISPER_MODEL  (default "medium"  — already cached locally)
   WHISPER_DEVICE (default "auto")
   WHISPER_COMPUTE(default "int8")   — fast CPU inference on Apple Silicon
+  WHISPER_VAD    (default "false")  — Silero VAD filter on/off. Disable for
+                                       quiet system-audio (Zoom, Meet) where
+                                       the loopback level is often below the
+                                       VAD threshold and gets dropped as
+                                       silence. Set to "true" to re-enable.
+  WHISPER_CHUNK_SECONDS (default "8")  — audio chunk length per request
+  WHISPER_LOG_LEVEL (default "INFO")
 """
 import io
 import os
@@ -29,11 +36,19 @@ PORT = int(os.environ.get("WHISPER_PORT", "18799"))
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "medium")
 DEVICE = os.environ.get("WHISPER_DEVICE", "auto")
 COMPUTE = os.environ.get("WHISPER_COMPUTE", "int8")
+# Default OFF: VAD was eating real system-audio (Zoom/Meet loopback is often
+# too quiet to clear Silero's threshold). Re-enable with WHISPER_VAD=true if
+# you'd rather aggressively drop silence and accept some speech loss.
+VAD_FILTER = os.environ.get("WHISPER_VAD", "false").strip().lower() in ("1", "true", "yes", "on")
+LOG_LEVEL = os.environ.get("WHISPER_LOG_LEVEL", "INFO").upper()
 
 def log(*a):
     print("[whisper_server]", *a, file=sys.stderr, flush=True)
 
-log(f"loading faster-whisper model={MODEL_NAME} device={DEVICE} compute={COMPUTE} ...")
+log(
+    f"loading faster-whisper model={MODEL_NAME} device={DEVICE} compute={COMPUTE} "
+    f"vad={VAD_FILTER} log_level={LOG_LEVEL} ..."
+)
 MODEL = WhisperModel(MODEL_NAME, device=DEVICE, compute_type=COMPUTE)
 log("model loaded — ready")
 
@@ -67,14 +82,39 @@ def transcribe(audio: bytes) -> str:
     with tempfile.NamedTemporaryFile(suffix=".webm", delete=True) as tf:
         tf.write(audio)
         tf.flush()
+        # Capture the per-chunk audio level so we can log silence vs. speech.
+        # (Uses RMS over the raw 16-bit PCM that PyAV decodes.)
+        try:
+            import av  # type: ignore
+            container = av.open(tf.name)
+            stream = container.streams.audio[0]
+            samples = []
+            for frame in container.decode(stream):
+                arr = frame.to_ndarray()
+                if arr.size:
+                    samples.append(arr.astype("float32") / 32768.0)
+            if samples:
+                import numpy as np  # type: ignore
+                pcm = np.concatenate(samples, axis=1).reshape(-1)
+                rms = float(np.sqrt(np.mean(pcm ** 2)))
+                peak = float(np.max(np.abs(pcm)))
+                log(f"chunk audio level: rms={rms:.4f} peak={peak:.4f}")
+        except Exception as e:  # noqa: BLE001
+            log("level probe failed:", repr(e))
+
+        # Reset file pointer — the probe may have advanced state in some decoders.
+        tf.seek(0)
+        tf.flush()
         segments, _info = MODEL.transcribe(
             tf.name,
             language="en",
             beam_size=1,
-            vad_filter=True,                 # skip silence — faster, fewer hallucinations
+            vad_filter=VAD_FILTER,           # default OFF — see top-of-file
             condition_on_previous_text=False,
         )
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        log(f"transcribed {len(text)} chars: {text[:120]!r}")
+        return text
 
 
 class Handler(BaseHTTPRequestHandler):

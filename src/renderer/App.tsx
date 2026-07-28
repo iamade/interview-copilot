@@ -55,6 +55,8 @@ export default function App() {
 
   const transcriptBuffer = useRef('');
   const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [audioLevel, setAudioLevel] = useState(0);
+  const [audioSilentSeconds, setAudioSilentSeconds] = useState(0);
 
   // Load saved settings on mount
   useEffect(() => {
@@ -67,10 +69,21 @@ export default function App() {
       if (!api) return;
       const stored = await api.getAllStore();
       if (stored) {
+        const storedProvider: LLMProvider =
+          (stored.llmProvider as LLMProvider) || (DEFAULT_SETTINGS.provider as LLMProvider);
+        const storedModel: string = stored.llmModel || DEFAULT_SETTINGS.model;
+
+        // Migration: if the stored model no longer exists in the catalog
+        // (e.g. 'claude-opus-5' was renamed to 'claude-opus-4-5-20251101'),
+        // fall back to the first model for that provider so the app keeps working.
+        const validModels = PROVIDER_MODELS[storedProvider]?.models || [];
+        const isValidModel = validModels.some((m) => m.id === storedModel);
+        const resolvedModel = isValidModel ? storedModel : validModels[0]?.id || storedModel;
+
         setSettings((prev) => ({
           ...prev,
-          provider: stored.llmProvider || prev.provider,
-          model: stored.llmModel || prev.model,
+          provider: storedProvider,
+          model: resolvedModel,
           apiKeys: stored.apiKeys || prev.apiKeys,
           ollamaEndpoint: stored.ollamaEndpoint || prev.ollamaEndpoint,
           customEndpoints: stored.customEndpoints || prev.customEndpoints,
@@ -141,25 +154,39 @@ export default function App() {
 
   async function startListening() {
     setError(null);
+    setAudioLevel(0);
+    setAudioSilentSeconds(0);
+    // Wire up real-time level + silence metering for the UI meter.
+    const removeLevel = audioService.addLevelListener((lvl) => setAudioLevel(lvl));
+    const removeSilence = audioService.addSilenceListener((s) => setAudioSilentSeconds(s));
     try {
       // Capture the call's output, not the candidate's microphone. This works
-      // with speakers or a headset because it taps system audio before output.
+      // with speakers or a a wired headset because it taps system audio before output.
       console.log('[App] Starting interviewer system-audio capture');
-      await audioService.startSystemAudioCapture(handleTranscription, {
-        mode: settings.transcriptionMode,
-        whisperApiKey: settings.apiKeys['openai'],
-      });
+      await audioService.startSystemAudioCapture(
+        (chunk) => {
+          handleTranscription(chunk);
+        },
+        {
+          mode: settings.transcriptionMode,
+          whisperApiKey: settings.apiKeys['openai'],
+        }
+      );
 
       setIsListening(true);
       setMode('interview');
     } catch (e: any) {
       setError(`Audio capture failed: ${e.message}`);
+      removeLevel();
+      removeSilence();
     }
   }
 
   function stopListening() {
     audioService.stopCapture();
     setIsListening(false);
+    setAudioLevel(0);
+    setAudioSilentSeconds(0);
     if (silenceTimer.current) clearTimeout(silenceTimer.current);
   }
 
@@ -399,6 +426,8 @@ RULES:
             onAnswerThis={handleAnswerThis}
             onClearTranscript={handleClearTranscript}
             fontSize={settings.fontSize}
+            audioLevel={audioLevel}
+            audioSilentSeconds={audioSilentSeconds}
           />
         )}
 

@@ -54,8 +54,39 @@ function findWhisperScript(): string | null {
   return null;
 }
 
+/**
+ * Kill any process holding the whisper port. We do this BEFORE checking
+ * `isWhisperReady()` so that stale servers (left running after a ^C, a
+ * crash, or a previous version of the app) get replaced with a fresh
+ * one that picks up the current env config (e.g. WHISPER_VAD).
+ */
+async function freeWhisperPort(): Promise<void> {
+  const port = 18799;
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`).toString().trim();
+    if (!out) return;
+    const pids = out.split('\n').filter(Boolean);
+    for (const pid of pids) {
+      const n = parseInt(pid, 10);
+      if (Number.isFinite(n) && n !== process.pid) {
+        console.log(`[Main] Killing stale Whisper process on :${port} (pid ${n})`);
+        try { process.kill(n, 'SIGTERM'); } catch (_) { /* ignore */ }
+      }
+    }
+    // Give the OS a moment to release the port
+    await new Promise((r) => setTimeout(r, 800));
+  } catch (e) {
+    // lsof missing or no permission — fall back to the existing reuse-or-bind flow
+  }
+}
+
 async function startWhisperServer() {
   try {
+    // Always start from a clean port so we never inherit a stale WHISPER_VAD=off
+    // (or any other) config from a previous run.
+    await freeWhisperPort();
+
     if (await isWhisperReady()) {
       console.log('[Main] Reusing Whisper server already listening on 127.0.0.1:18799');
       return;
@@ -122,7 +153,7 @@ const Store = require('electron-store');
 const store = new Store({
   defaults: {
     llmProvider: 'anthropic',
-    llmModel: 'claude-opus-4-6',
+    llmModel: 'claude-opus-5',
     apiKeys: {},
     ollamaEndpoint: 'https://api.ollama.com',
     customEndpoints: {},
@@ -164,6 +195,7 @@ function loadEnvKeys() {
   const currentKeys: Record<string, string> = store.get('apiKeys') || {};
   const keyMap: Record<string, string> = {
     ANTHROPIC_API_KEY: 'anthropic',
+    MINIMAX_API_KEY: 'minimax',
     OPENAI_API_KEY: 'openai',
     GEMINI_API_KEY: 'gemini',
     GLM_API_KEY: 'glm',
@@ -197,6 +229,10 @@ function loadEnvKeys() {
   const currentEndpoints: Record<string, string> = store.get('customEndpoints') || {};
   if (envVars['OPENCLAW_ENDPOINT'] && !currentEndpoints['openclaw']) {
     currentEndpoints['openclaw'] = envVars['OPENCLAW_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['MINIMAX_ENDPOINT'] && !currentEndpoints['minimax']) {
+    currentEndpoints['minimax'] = envVars['MINIMAX_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
 }

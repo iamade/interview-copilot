@@ -5,7 +5,8 @@
 export type LLMProvider =
   | 'gateway_ollama'    // NEW default — routes through OpenClaw gateway → ollama/deepseek-v4-pro:cloud
   | 'featherless'       // NEW alternative — routes through OpenClaw gateway → featherless tier
-  | 'anthropic'
+  | 'anthropic'         // Claude (api.anthropic.com)
+  | 'minimax'           // MiniMax (api.minimax.io) — direct, OpenAI-compatible
   | 'openai'
   | 'gemini'
   | 'ollama'
@@ -16,6 +17,10 @@ export type LLMProvider =
 
 // OpenClaw gateway (OpenAI-compatible) running locally on the Mac.
 export const OPENCLAW_GATEWAY_ENDPOINT = 'http://localhost:18789/v1/chat/completions';
+
+// MiniMax — OpenAI-compatible chat completions at api.minimax.io/v1.
+// Override with the `minimaxEndpoint` setting if MiniMax ever moves hostnames.
+export const MINIMAX_API_ENDPOINT = 'https://api.minimax.io/v1/chat/completions';
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -47,12 +52,16 @@ export interface LLMResponse {
 // Provider model catalogs
 export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id: string; name: string }[] }> = {
   gateway_ollama: {
-    label: 'Ollama Cloud (default · via OpenClaw)',
+    label: 'Ollama Cloud + MiniMax (default · via OpenClaw)',
     // All ids MUST carry the :cloud suffix — bare names route to a local Ollama daemon.
+    // MiniMax models use native MiniMax API (not Ollama relay).
     models: [
+      { id: 'minimax/MiniMax-M3', name: 'MiniMax M3 (1M context · frontier)' },
+      { id: 'minimax/MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed (fast)' },
+      { id: 'minimax/MiniMax-M2.7', name: 'MiniMax M2.7 (reasoning)' },
       { id: 'ollama/deepseek-v4-pro:cloud', name: 'DeepSeek V4 Pro (cloud)' },
       { id: 'ollama/qwen3.5:397b-cloud', name: 'Qwen 3.5 397B (cloud)' },
-      { id: 'ollama/minimax-m3:cloud', name: 'MiniMax M3 (cloud)' },
+      { id: 'ollama/minimax-m3:cloud', name: 'MiniMax M3 (Ollama relay)' },
       { id: 'ollama/kimi-k2.6:cloud', name: 'Kimi K2.6 (cloud)' },
     ],
   },
@@ -66,14 +75,29 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
   anthropic: {
     label: 'Anthropic (Claude)',
     models: [
-      { id: 'claude-fable-5', name: 'Claude Fable 5 (Best)' },
-      { id: 'claude-opus-5', name: 'Claude Opus 5' },
+      { id: 'claude-fable-5', name: 'Claude Fable 5 (Frontier)' },
+      // Claude Opus 5 — released 2026-07-24, current flagship workhorse at $5/$25.
+      { id: 'claude-opus-5', name: 'Claude Opus 5 (Latest · 1M ctx · flagship)' },
       { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
       { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
       { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
       { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 (Fast)' },
       { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
       { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Fastest)' },
+    ],
+  },
+  minimax: {
+    label: 'MiniMax (direct · OpenAI-compatible)',
+    // Direct hits to api.minimax.io — no gateway needed.
+    // MiniMax-M3 is the frontier 1M-context model; M2.7-highspeed is the fast tier.
+    models: [
+      { id: 'MiniMax-M3', name: 'MiniMax M3 (1M context · frontier)' },
+      { id: 'MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed' },
+      { id: 'MiniMax-M2.7', name: 'MiniMax M2.7 (reasoning)' },
+      { id: 'MiniMax-M2.1-highspeed', name: 'MiniMax M2.1 Highspeed' },
+      { id: 'MiniMax-M2.1', name: 'MiniMax M2.1' },
+      { id: 'MiniMax-M2', name: 'MiniMax M2' },
     ],
   },
   openai: {
@@ -211,7 +235,9 @@ async function callAnthropic(messages: Message[], config: LLMConfig): Promise<LL
     body: JSON.stringify({
       model: config.model,
       max_tokens: config.maxTokens || 4096,
-      temperature: config.temperature ?? 0.3,
+      // NOTE: `temperature` is deprecated on Claude Opus 4.7+, Opus 4.8, and Sonnet 5.
+      // Anthropic returns HTTP 400 if you set a non-default value. Omit it entirely
+      // and let the model use its default (1.0).
       system: systemMsg?.content || '',
       messages: anthropicMessages,
     }),
@@ -394,7 +420,73 @@ async function callGLM(messages: Message[], config: LLMConfig): Promise<LLMRespo
   };
 }
 
-// ── OpenClaw local gateway (OpenAI-compatible) ──
+// ── MiniMax (direct, OpenAI-compatible) ──
+// Hits api.minimax.io/v1/chat/completions. MiniMax models (M3, M2.7, M2.x) include
+// <think>…</think> blocks in the response by default — strip them so the
+// interview answer shows the final answer only, not the chain-of-thought.
+async function callMiniMax(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || MINIMAX_API_ENDPOINT;
+
+  if (!config.apiKey) {
+    throw new Error('MiniMax: API key is required (set it in Settings → API Keys → MiniMax)');
+  }
+
+  const data = await corsFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content:
+          typeof m.content === 'string'
+            ? m.content
+            : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      // MiniMax lets you set temperature on M2/M3; harmless to pass.
+      temperature: config.temperature ?? 0.3,
+      stream: false,
+    }),
+  });
+
+  if (data.error) {
+    const msg = data.error?.message || data.error || JSON.stringify(data.error);
+    throw new Error(`MiniMax: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
+  }
+
+  // MiniMax returns content with embedded <think>…</think> tags — strip them.
+  // Also collapses any leading/trailing whitespace left behind.
+  const stripThinkTags = (s: string): string =>
+    s
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<\/?think>/gi, '')
+      .trim();
+
+  // Some responses put reasoning in `reasoning_content` (when reasoning_split=true).
+  const reasoning =
+    typeof data.choices?.[0]?.message?.reasoning_content === 'string'
+      ? data.choices[0].message.reasoning_content
+      : '';
+  const rawContent =
+    data.choices?.[0]?.message?.content ||
+    data.message?.content ||
+    data.content ||
+    '';
+  const text = stripThinkTags(String(rawContent || reasoning || ''));
+
+  return {
+    text,
+    provider: 'minimax',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
+
 // Routes Ollama / Featherless requests through the OpenClaw daemon on localhost:18789.
 // No API key needed — the daemon already holds upstream credentials.
 async function callGateway(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
@@ -535,6 +627,8 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
       return callGateway(messages, config);
     case 'anthropic':
       return callAnthropic(messages, config);
+    case 'minimax':
+      return callMiniMax(messages, config);
     case 'openai':
       return callOpenAI(messages, config);
     case 'gemini':
@@ -609,7 +703,7 @@ export async function streamLLM(
       body: JSON.stringify({
         model: config.model,
         max_tokens: config.maxTokens || 4096,
-        temperature: config.temperature ?? 0.3,
+        // `temperature` is deprecated on Opus 4.7+ / 4.8 / Sonnet 5 — omit it.
         system: systemMsg?.content || '',
         messages: anthropicMessages,
         stream: true,
