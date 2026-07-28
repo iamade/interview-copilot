@@ -1,10 +1,8 @@
 // ── Audio Capture + Speech-to-Text ──
-// Captures audio via microphone (picks up interviewer through speakers)
-// and transcribes using browser SpeechRecognition or OpenAI Whisper.
-//
-// NOTE: macOS does NOT allow system audio capture without a virtual audio
-// driver (e.g. BlackHole). The microphone is the reliable primary path —
-// it hears the interviewer's voice coming through your speakers.
+// Captures the call's system/desktop audio (the interviewer), then transcribes
+// it using browser SpeechRecognition or Whisper. Microphone capture remains an
+// explicit fallback for platforms where desktop audio is unavailable; it is
+// never selected silently because that would transcribe the candidate instead.
 
 export interface TranscriptionChunk {
   text: string;
@@ -30,11 +28,11 @@ class AudioCaptureService {
   private chunkInterval: ReturnType<typeof setInterval> | null = null;
 
   /**
-   * Start capture — tries system audio (desktop source) first, then
-   * falls back to microphone automatically.
+   * Capture system audio through getDisplayMedia. Electron's main-process
+   * display-media handler supplies the primary display plus an audio loopback
+   * track. The video track is stopped immediately; only call audio is recorded.
    */
-  async startCapture(
-    sourceId: string,
+  async startSystemAudioCapture(
     callback: TranscriptionCallback,
     options?: {
       mode?: 'browser' | 'whisper';
@@ -48,44 +46,46 @@ class AudioCaptureService {
     if (options?.whisperEndpoint) this.whisperEndpoint = options.whisperEndpoint;
 
     try {
-      // Attempt desktop audio capture.
-      // Electron requires BOTH audio AND video when using chromeMediaSource: 'desktop'.
-      // We request both, then immediately discard the video track.
-      this.mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sourceId,
-          },
-        } as any,
+      this.mediaStream = await navigator.mediaDevices.getDisplayMedia({
+        audio: true,
         video: {
-          mandatory: {
-            chromeMediaSource: 'desktop',
-            chromeMediaSourceId: sourceId,
-            maxWidth: 1,
-            maxHeight: 1,
-            maxFrameRate: 1,
-          },
-        } as any,
+          width: { ideal: 1 },
+          height: { ideal: 1 },
+          frameRate: { ideal: 1, max: 1 },
+        },
       });
 
-      // Drop the video track — we only need audio
+      const audioTracks = this.mediaStream.getAudioTracks();
       this.mediaStream.getVideoTracks().forEach((track) => track.stop());
 
-      console.log('[AudioService] System audio capture started');
+      if (audioTracks.length === 0) {
+        this.mediaStream.getTracks().forEach((track) => track.stop());
+        this.mediaStream = null;
+        throw new Error(
+          'No system-audio track was provided. Allow Screen & System Audio Recording for Interview Copilot in System Settings → Privacy & Security.'
+        );
+      }
+
+      console.log(
+        '[AudioService] Interviewer system-audio capture started:',
+        audioTracks.map((track) => ({ label: track.label, settings: track.getSettings() }))
+      );
       this.isCapturing = true;
       this.startTranscription();
     } catch (error) {
-      console.warn('[AudioService] System audio unavailable, falling back to microphone:', error);
-      // On macOS this will almost always happen — system audio requires a
-      // virtual audio driver. Mic fallback is the expected path.
-      await this.startMicCapture(callback, options);
+      this.stopCapture();
+      console.error('[AudioService] Interviewer system-audio capture failed:', error);
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Could not capture the interviewer's system audio: ${detail}. ` +
+        'This mode intentionally does not fall back to the microphone.'
+      );
     }
   }
 
   /**
-   * Fallback: capture from microphone.
-   * The mic will pick up the interviewer's voice from your speakers.
+   * Explicit microphone fallback for diagnostics/unsupported platforms.
+   * This captures the candidate and must never be selected automatically.
    */
   async startMicCapture(
     callback: TranscriptionCallback,
@@ -240,7 +240,7 @@ class AudioCaptureService {
     }
   }
 
-  // Whisper-based transcription (higher quality, requires API key)
+  // Whisper-based transcription (local mode needs no API key)
   // Uses stop/restart pattern so each chunk is a complete valid WebM file
   // with proper headers (timeslice fragments lack headers and get rejected).
   private startWhisperTranscription(): void {
@@ -269,15 +269,17 @@ class AudioCaptureService {
 
     // Start recording (no timeslice — we control chunks via stop/start)
     this.mediaRecorder.start();
-    console.log('[AudioService] Whisper: MediaRecorder started, will cycle every 5s');
+    console.log('[AudioService] Whisper: MediaRecorder started, will cycle every 8s');
 
-    // Every 5 seconds, stop the recorder to trigger ondataavailable with a
+    // Eight-second chunks reduce word loss at recorder boundaries while keeping
+    // the answer latency low enough for a live interview.
+    // Stop the recorder to trigger ondataavailable with a
     // complete valid WebM file, then ondataavailable restarts it.
     this.chunkInterval = setInterval(() => {
       if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
         this.mediaRecorder.stop();
       }
-    }, 5000);
+    }, 8000);
   }
 
   private async transcribeWithWhisper(audioBlob: Blob): Promise<void> {

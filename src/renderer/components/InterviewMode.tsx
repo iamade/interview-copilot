@@ -90,7 +90,7 @@ export default function InterviewMode({
                 <line x1="12" y1="19" x2="12" y2="23" />
                 <line x1="8" y1="23" x2="16" y2="23" />
               </svg>
-              Start Listening
+              Listen to Interviewer
             </>
           )}
         </button>
@@ -107,7 +107,7 @@ export default function InterviewMode({
         <div className="rounded-lg bg-gray-800/40 border border-gray-700/30 fade-in overflow-hidden">
           <div className="px-3 py-2">
             <div className="text-[9px] text-gray-500 mb-1 uppercase tracking-wider flex items-center gap-2">
-              <span>Hearing...</span>
+              <span>Hearing interviewer (system audio)...</span>
               <div className="flex items-center gap-0.5">
                 <div className="w-1 h-2 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '0ms' }} />
                 <div className="w-1 h-3 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '150ms' }} />
@@ -212,7 +212,7 @@ export default function InterviewMode({
       {!suggestedAnswer && !isGenerating && !isListening && (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-600 text-xs gap-2">
           <div className="text-2xl">🎤</div>
-          <div>Start listening or type a question</div>
+          <div>Listen to the interviewer or type a question</div>
           <div className="text-[10px] text-gray-700">AI will suggest answers when you tap "Answer This"</div>
         </div>
       )}
@@ -226,7 +226,7 @@ export default function InterviewMode({
             <div className="w-1 h-5 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '450ms' }} />
             <div className="w-1 h-3 bg-red-500/60 rounded-full pulse-dot" style={{ animationDelay: '600ms' }} />
           </div>
-          <div>Listening...</div>
+          <div>Listening to system audio...</div>
           <div className="text-[10px] text-gray-700">Tap "Answer This" when the interviewer finishes a question</div>
         </div>
       )}

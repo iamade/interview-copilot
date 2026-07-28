@@ -27,7 +27,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "concurrently": "^9.1.0",
-    "electron": "^33.0.0",
+    "electron": "^42.7.1",
     "electron-builder": "^25.1.0",
     "lucide-react": "^0.460.0",
     "react": "^19.0.0",
@@ -43,7 +43,8 @@
       "entitlements": "build/entitlements.mac.plist",
       "extendInfo": {
         "NSMicrophoneUsageDescription": "Interview Copilot needs microphone access to capture interview audio.",
-        "NSScreenCaptureUsageDescription": "Interview Copilot needs screen capture to read coding questions."
+        "NSScreenCaptureUsageDescription": "Interview Copilot needs screen capture to read coding questions.",
+        "NSAudioCaptureUsageDescription": "Interview Copilot captures system audio so it can transcribe the interviewer's questions."
       }
     },
     "win": {
@@ -54,6 +55,10 @@
     },
     "files": [
       "dist/**/*",
+      "whisper_server.py"
+    ],
+    "asarUnpack": [
+      "dist/main/whisper_server.py",
       "whisper_server.py"
     ]
   }

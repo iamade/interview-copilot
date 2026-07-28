@@ -142,12 +142,10 @@ export default function App() {
   async function startListening() {
     setError(null);
     try {
-      // Go straight to microphone capture.
-      // macOS does NOT support system audio capture without a virtual audio driver,
-      // and desktop capture silently records silence. The mic picks up the
-      // interviewer's voice from your speakers — this is the reliable path.
-      console.log('[App] Starting mic capture, whisperApiKey present:', !!settings.apiKeys['openai']);
-      await audioService.startMicCapture(handleTranscription, {
+      // Capture the call's output, not the candidate's microphone. This works
+      // with speakers or a headset because it taps system audio before output.
+      console.log('[App] Starting interviewer system-audio capture');
+      await audioService.startSystemAudioCapture(handleTranscription, {
         mode: settings.transcriptionMode,
         whisperApiKey: settings.apiKeys['openai'],
       });

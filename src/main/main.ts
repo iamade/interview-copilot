@@ -9,22 +9,22 @@ import { spawn, ChildProcess } from 'child_process';
 // http://localhost:18799/v1/audio/transcriptions (OpenAI-compatible shape).
 let whisperProc: ChildProcess | null = null;
 
+async function isWhisperReady(): Promise<boolean> {
+  try {
+    const res = await fetch('http://127.0.0.1:18799/');
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 function waitForWhisperReady(timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const start = Date.now();
     const check = async () => {
-      if (!whisperProc) {
-        resolve(false);
+      if (await isWhisperReady()) {
+        resolve(true);
         return;
-      }
-      try {
-        const res = await fetch('http://127.0.0.1:18799/');
-        if (res.ok) {
-          resolve(true);
-          return;
-        }
-      } catch {
-        // server not ready yet
       }
       if (Date.now() - start > timeoutMs) {
         resolve(false);
@@ -40,6 +40,8 @@ function waitForWhisperReady(timeoutMs: number): Promise<boolean> {
 function findWhisperScript(): string | null {
   // Search candidate locations — covers dev, prod (packaged), and direct electron runs.
   const candidates = [
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'whisper_server.py'),
+    path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'main', 'whisper_server.py'),
     path.join(app.getAppPath(), 'whisper_server.py'),       // project root (dev) or dist/main (prod w/ copy step)
     path.join(__dirname, 'whisper_server.py'),               // dist/main (same dir as compiled main.js)
     path.join(__dirname, '..', 'whisper_server.py'),         // one level up from dist/main
@@ -54,10 +56,17 @@ function findWhisperScript(): string | null {
 
 async function startWhisperServer() {
   try {
+    if (await isWhisperReady()) {
+      console.log('[Main] Reusing Whisper server already listening on 127.0.0.1:18799');
+      return;
+    }
+
     const scriptPath = findWhisperScript();
     if (!scriptPath) {
       console.warn('[Main] whisper_server.py not found in any candidate location — local transcription disabled');
       console.warn('[Main] Searched:', [
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'whisper_server.py'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'dist', 'main', 'whisper_server.py'),
         path.join(app.getAppPath(), 'whisper_server.py'),
         path.join(__dirname, 'whisper_server.py'),
         path.join(__dirname, '..', 'whisper_server.py'),
@@ -536,6 +545,33 @@ app.whenReady().then(() => {
     const allowed = ['media', 'microphone', 'audioCapture', 'display-capture', 'screen'];
     return allowed.includes(permission);
   });
+
+  // getDisplayMedia in the renderer asks for desktop video + audio. Electron
+  // supplies the primary display and an OS-level loopback track. On macOS this
+  // requires Electron 39+ and NSAudioCaptureUsageDescription in Info.plist.
+  session.defaultSession.setDisplayMediaRequestHandler((_request, callback) => {
+    desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: 0, height: 0 },
+    }).then((sources) => {
+      const primaryDisplayId = String(screen.getPrimaryDisplay().id);
+      const source =
+        sources.find((candidate) => candidate.display_id === primaryDisplayId) ||
+        sources[0];
+
+      if (!source) {
+        console.error('[Main] System audio capture failed: no display source available');
+        callback({});
+        return;
+      }
+
+      console.log('[Main] Granting display capture with system-audio loopback:', source.name);
+      callback({ video: source, audio: 'loopback' });
+    }).catch((error) => {
+      console.error('[Main] Failed to resolve display source for system audio:', error);
+      callback({});
+    });
+  }, { useSystemPicker: false });
 
   // Start the local Whisper transcription server (warm model, no API key).
   startWhisperServer();
