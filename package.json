@@ -9,7 +9,7 @@
     "dev:main": "tsc -p tsconfig.main.json && electron dist/main/main.js",
     "build": "npm run build:renderer && npm run build:main",
     "build:renderer": "vite build",
-    "build:main": "tsc -p tsconfig.main.json",
+    "build:main": "tsc -p tsconfig.main.json && cp whisper_server.py dist/main/whisper_server.py",
     "start": "npm run build && electron dist/main/main.js",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder"
@@ -53,7 +53,8 @@
       "target": "AppImage"
     },
     "files": [
-      "dist/**/*"
+      "dist/**/*",
+      "whisper_server.py"
     ]
   }
 }

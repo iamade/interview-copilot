@@ -9,11 +9,61 @@ import { spawn, ChildProcess } from 'child_process';
 // http://localhost:18799/v1/audio/transcriptions (OpenAI-compatible shape).
 let whisperProc: ChildProcess | null = null;
 
-function startWhisperServer() {
+function waitForWhisperReady(timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const start = Date.now();
+    const check = async () => {
+      if (!whisperProc) {
+        resolve(false);
+        return;
+      }
+      try {
+        const res = await fetch('http://127.0.0.1:18799/');
+        if (res.ok) {
+          resolve(true);
+          return;
+        }
+      } catch {
+        // server not ready yet
+      }
+      if (Date.now() - start > timeoutMs) {
+        resolve(false);
+        return;
+      }
+      setTimeout(check, 1000);
+    };
+    // Give the server a 2s head start before first poll.
+    setTimeout(check, 2000);
+  });
+}
+
+function findWhisperScript(): string | null {
+  // Search candidate locations — covers dev, prod (packaged), and direct electron runs.
+  const candidates = [
+    path.join(app.getAppPath(), 'whisper_server.py'),       // project root (dev) or dist/main (prod w/ copy step)
+    path.join(__dirname, 'whisper_server.py'),               // dist/main (same dir as compiled main.js)
+    path.join(__dirname, '..', 'whisper_server.py'),         // one level up from dist/main
+    path.join(app.getAppPath(), '..', 'whisper_server.py'),  // parent of app path (packaged app)
+    path.join(process.cwd(), 'whisper_server.py'),           // cwd fallback
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+async function startWhisperServer() {
   try {
-    const scriptPath = path.join(app.getAppPath(), 'whisper_server.py');
-    if (!fs.existsSync(scriptPath)) {
-      console.warn('[Main] whisper_server.py not found at', scriptPath, '— local transcription disabled');
+    const scriptPath = findWhisperScript();
+    if (!scriptPath) {
+      console.warn('[Main] whisper_server.py not found in any candidate location — local transcription disabled');
+      console.warn('[Main] Searched:', [
+        path.join(app.getAppPath(), 'whisper_server.py'),
+        path.join(__dirname, 'whisper_server.py'),
+        path.join(__dirname, '..', 'whisper_server.py'),
+        path.join(app.getAppPath(), '..', 'whisper_server.py'),
+        path.join(process.cwd(), 'whisper_server.py'),
+      ]);
       return;
     }
     const python = process.env.PYTHON || 'python3';
@@ -34,6 +84,15 @@ function startWhisperServer() {
       console.log('[Main] Whisper server exited, code', code);
       whisperProc = null;
     });
+
+    // Wait for the server to be ready before returning.
+    // The model takes 10-30s to load; we poll the health endpoint.
+    const ready = await waitForWhisperReady(60000); // 60s max
+    if (ready) {
+      console.log('[Main] Whisper server is ready');
+    } else {
+      console.warn('[Main] Whisper server did not become ready within 60s — transcription may fail initially');
+    }
   } catch (e) {
     console.error('[Main] Failed to start Whisper server:', e);
   }
@@ -258,55 +317,48 @@ ipcMain.handle('fetch:proxy', async (_event, url: string, options: {
 });
 
 // ── Whisper audio transcription proxy ──
-// Handles binary audio data for OpenAI Whisper API
-// Uses Node.js built-in https module to send multipart/form-data (most reliable)
+// Handles binary audio data for local faster-whisper server or remote OpenAI Whisper API
 ipcMain.handle('whisper:transcribe', async (_event, audioBuffer: ArrayBuffer, apiKey: string, endpoint: string) => {
   console.log(`[Main] Whisper: Received ${(audioBuffer.byteLength / 1024).toFixed(1)}KB audio, sending to ${endpoint}`);
 
   try {
-    // Build multipart/form-data manually (most compatible approach)
+    const isLocal = endpoint.includes('localhost') || endpoint.includes('127.0.0.1');
     const boundary = '----WhisperBoundary' + Date.now();
     const audioBytes = Buffer.from(audioBuffer);
 
-    const preamble = [
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="file"; filename="audio.webm"',
-      'Content-Type: audio/webm',
-      '',
-      '',
-    ].join('\r\n');
+    // Build multipart/form-data body.
+    // Local faster-whisper only needs the file field; remote OpenAI needs model + language fields too.
+    const parts: Buffer[] = [];
 
-    const fields = [
-      '',
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="model"',
-      '',
-      'whisper-1',
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="language"',
-      '',
-      'en',
-      `--${boundary}`,
-      'Content-Disposition: form-data; name="response_format"',
-      '',
-      'json',
-      `--${boundary}--`,
-      '',
-    ].join('\r\n');
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.webm"\r\nContent-Type: audio/webm\r\n\r\n`));
+    parts.push(audioBytes);
 
-    const body = Buffer.concat([
-      Buffer.from(preamble),
-      audioBytes,
-      Buffer.from(fields),
-    ]);
+    if (!isLocal) {
+      // Remote OpenAI Whisper needs model + language fields
+      parts.push(Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="model"\r\n\r\nwhisper-1`));
+      parts.push(Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="language"\r\n\r\nen`));
+      parts.push(Buffer.from(`\r\n--${boundary}\r\nContent-Disposition: form-data; name="response_format"\r\n\r\njson`));
+    }
+
+    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
+
+    const body = Buffer.concat(parts);
+
+    const headers: Record<string, string> = {
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+    };
+
+    // Only send Authorization header for remote endpoints that need it.
+    // Local faster-whisper server doesn't check auth and an unexpected header
+    // can cause issues with some Python HTTP servers.
+    if (!isLocal && apiKey) {
+      headers['Authorization'] = `Bearer ${apiKey}`;
+    }
 
     const response = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': `multipart/form-data; boundary=${boundary}`,
-      },
-      body: body,
+      headers,
+      body,
     });
 
     const data = await response.json();
