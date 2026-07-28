@@ -1,0 +1,59 @@
+{
+  "name": "interview-copilot",
+  "version": "1.0.0",
+  "description": "AI-powered interview assistant with stealth overlay for video calls",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:main\"",
+    "dev:renderer": "vite",
+    "dev:main": "tsc -p tsconfig.main.json && electron dist/main/main.js",
+    "build": "npm run build:renderer && npm run build:main",
+    "build:renderer": "vite build",
+    "build:main": "tsc -p tsconfig.main.json",
+    "start": "npm run build && electron dist/main/main.js",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@google/genai": "^1.38.0",
+    "adm-zip": "^0.5.17",
+    "electron-store": "^8.1.0",
+    "marked": "^15.0.0",
+    "openai": "^4.77.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.1.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.0",
+    "lucide-react": "^0.460.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.jobarchitect.interview-copilot",
+    "productName": "Interview Copilot",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "entitlements": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Interview Copilot needs microphone access to capture interview audio.",
+        "NSScreenCaptureUsageDescription": "Interview Copilot needs screen capture to read coding questions."
+      }
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    },
+    "files": [
+      "dist/**/*"
+    ]
+  }
+}
