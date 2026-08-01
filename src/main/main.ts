@@ -160,6 +160,7 @@ const store = new Store({
     resumeText: '',
     jobDescription: '',
     stories: '',
+    prepDocs: [],
     overlayOpacity: 0.92,
     overlayPosition: { x: 50, y: 50 },
     overlaySize: { width: 460, height: 700 },
@@ -508,6 +509,53 @@ ipcMain.handle('capture:getAudioSources', async () => {
   }));
 });
 
+// Extracts plain text from a resume/job/prep-doc file on disk.
+function extractFileContent(filePath: string): string {
+  const ext = path.extname(filePath).toLowerCase();
+  let content = '';
+
+  try {
+    if (ext === '.txt' || ext === '.md') {
+      // Plain text files — read as UTF-8
+      content = fs.readFileSync(filePath, 'utf-8');
+    } else if (ext === '.docx') {
+      // DOCX: extract text from XML inside the zip
+      const AdmZip = require('adm-zip');
+      const zip = new AdmZip(filePath);
+      const docXml = zip.readAsText('word/document.xml');
+      // Strip XML tags to get plain text
+      content = docXml
+        .replace(/<w:br[^>]*\/>/g, '\n')
+        .replace(/<\/w:p>/g, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#x2019;/g, "'")
+        .replace(/&#x201[CD];/g, '"')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    } else if (ext === '.pdf') {
+      // PDF: read as binary and let the renderer handle it
+      // For now, return a note that PDF requires text extraction
+      content = `[PDF file: ${path.basename(filePath)}]\nNote: Please copy-paste the text content from your PDF, or use a .txt/.md/.docx file for best results.`;
+    } else {
+      // Attempt UTF-8 read for unknown formats
+      content = fs.readFileSync(filePath, 'utf-8');
+    }
+  } catch (err: any) {
+    // Fallback: try reading as UTF-8
+    try {
+      content = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+      content = `[Error reading file: ${err.message}]`;
+    }
+  }
+
+  return content;
+}
+
 // File dialogs for uploading resume/job docs
 ipcMain.handle('dialog:openFile', async (_event, options: { title: string; filters: any[] }) => {
   const result = await dialog.showOpenDialog({
@@ -520,51 +568,30 @@ ipcMain.handle('dialog:openFile', async (_event, options: { title: string; filte
 
   if (!result.canceled && result.filePaths.length > 0) {
     const filePath = result.filePaths[0];
-    const ext = path.extname(filePath).toLowerCase();
-    let content = '';
-
-    try {
-      if (ext === '.txt' || ext === '.md') {
-        // Plain text files — read as UTF-8
-        content = fs.readFileSync(filePath, 'utf-8');
-      } else if (ext === '.docx') {
-        // DOCX: extract text from XML inside the zip
-        const AdmZip = require('adm-zip');
-        const zip = new AdmZip(filePath);
-        const docXml = zip.readAsText('word/document.xml');
-        // Strip XML tags to get plain text
-        content = docXml
-          .replace(/<w:br[^>]*\/>/g, '\n')
-          .replace(/<\/w:p>/g, '\n')
-          .replace(/<[^>]+>/g, '')
-          .replace(/&amp;/g, '&')
-          .replace(/&lt;/g, '<')
-          .replace(/&gt;/g, '>')
-          .replace(/&quot;/g, '"')
-          .replace(/&#x2019;/g, "'")
-          .replace(/&#x201[CD];/g, '"')
-          .replace(/\n{3,}/g, '\n\n')
-          .trim();
-      } else if (ext === '.pdf') {
-        // PDF: read as binary and let the renderer handle it
-        // For now, return a note that PDF requires text extraction
-        content = `[PDF file: ${path.basename(filePath)}]\nNote: Please copy-paste the text content from your PDF, or use a .txt/.md/.docx file for best results.`;
-      } else {
-        // Attempt UTF-8 read for unknown formats
-        content = fs.readFileSync(filePath, 'utf-8');
-      }
-    } catch (err: any) {
-      // Fallback: try reading as UTF-8
-      try {
-        content = fs.readFileSync(filePath, 'utf-8');
-      } catch {
-        content = `[Error reading file: ${err.message}]`;
-      }
-    }
-
-    return { path: filePath, content, name: path.basename(filePath) };
+    return { path: filePath, content: extractFileContent(filePath), name: path.basename(filePath) };
   }
   return null;
+});
+
+// Multi-file dialog for uploading interview prep docs (company research, past
+// Q&A, cheat sheets, etc). Same extraction logic as the single-file dialog,
+// just returns one entry per selected file.
+ipcMain.handle('dialog:openFiles', async (_event, options: { title: string; filters?: any[] }) => {
+  const result = await dialog.showOpenDialog({
+    title: options.title,
+    filters: options.filters || [
+      { name: 'Documents', extensions: ['pdf', 'docx', 'txt', 'md'] },
+    ],
+    properties: ['openFile', 'multiSelections'],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) return [];
+
+  return result.filePaths.map((filePath) => ({
+    path: filePath,
+    content: extractFileContent(filePath),
+    name: path.basename(filePath),
+  }));
 });
 
 // ── App lifecycle ──

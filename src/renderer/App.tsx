@@ -35,7 +35,12 @@ const DEFAULT_CONTEXT: UserContext = {
   companyName: '',
   roleName: '',
   additionalNotes: '',
+  prepDocs: [],
 };
+
+// Cap on total prep-doc characters injected into the system prompt, so a
+// large batch of uploads can't blow out the context window / token budget.
+const MAX_PREP_DOCS_CHARS = 24000;
 
 export default function App() {
   const [mode, setMode] = useState<AppMode>('idle');
@@ -97,6 +102,7 @@ export default function App() {
           resumeText: stored.resumeText || prev.resumeText,
           jobDescription: stored.jobDescription || prev.jobDescription,
           stories: stored.stories || prev.stories,
+          prepDocs: Array.isArray(stored.prepDocs) ? stored.prepDocs : prev.prepDocs,
         }));
       }
     } catch (e) {
@@ -259,8 +265,20 @@ RULES:
   1. Best direct answer
   2. Optional short follow-up or example
   3. Only then a resume tie-in if truly relevant
-- Format: brief bullet points, then a short sample response`;
+- Format: brief bullet points, then a short sample response
+- Before answering, check the PREP DOCS section below (if present) for company-specific facts, positioning, or corrected terminology the candidate has already prepared — prefer that framing over generic knowledge`;
 
+    if (userContext.prepDocs.length > 0) {
+      let prepSection = '';
+      let remaining = MAX_PREP_DOCS_CHARS;
+      for (const doc of userContext.prepDocs) {
+        if (remaining <= 0) break;
+        const chunk = `\n\n[${doc.name}]\n${doc.content.slice(0, remaining)}`;
+        prepSection += chunk;
+        remaining -= chunk.length;
+      }
+      prompt += `\n\n── PREP DOCS (uploaded by candidate — consult before answering) ──${prepSection}`;
+    }
     if (userContext.resumeText) {
       prompt += `\n\n── CANDIDATE RESUME ──\n${userContext.resumeText}`;
     }
@@ -404,7 +422,16 @@ RULES:
         {mode === 'idle' && (
           <SetupPanel
             userContext={userContext}
-            onUpdateContext={setUserContext}
+            onUpdateContext={(ctx) => {
+              setUserContext(ctx);
+              const api = window.electronAPI;
+              if (api) {
+                api.setStore('resumeText', ctx.resumeText);
+                api.setStore('jobDescription', ctx.jobDescription);
+                api.setStore('stories', ctx.stories);
+                api.setStore('prepDocs', ctx.prepDocs);
+              }
+            }}
             onStartInterview={() => { setMode('interview'); }}
             onStartCoding={() => { setMode('coding'); }}
             settings={settings}
@@ -476,6 +503,7 @@ RULES:
                 await api.setStore('resumeText', ctx.resumeText);
                 await api.setStore('jobDescription', ctx.jobDescription);
                 await api.setStore('stories', ctx.stories);
+                await api.setStore('prepDocs', ctx.prepDocs);
               }
             }}
           />

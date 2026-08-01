@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File dialog
   openFile: (options: { title: string; filters?: any[] }) => ipcRenderer.invoke('dialog:openFile', options),
 
+  // Multi-file dialog — used for interview prep doc uploads
+  openFiles: (options: { title: string; filters?: any[] }) => ipcRenderer.invoke('dialog:openFiles', options),
+
   // Whisper audio transcription — sends binary audio to main process
   whisperTranscribe: (audioBuffer: ArrayBuffer, apiKey: string, endpoint: string) =>
     ipcRenderer.invoke('whisper:transcribe', audioBuffer, apiKey, endpoint),

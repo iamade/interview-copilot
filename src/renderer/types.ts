@@ -25,6 +25,11 @@ export interface ConversationEntry {
   type: 'question' | 'answer' | 'suggestion' | 'code';
 }
 
+export interface PrepDoc {
+  name: string;
+  content: string;
+}
+
 export interface UserContext {
   resumeText: string;
   jobDescription: string;
@@ -33,6 +38,7 @@ export interface UserContext {
   companyName: string;
   roleName: string;
   additionalNotes: string;
+  prepDocs: PrepDoc[];
 }
 
 export interface SettingsState {
@@ -61,6 +67,7 @@ declare global {
       takeScreenshot: () => Promise<string | null>;
       getAudioSources: () => Promise<Array<{ id: string; name: string; thumbnail: string }>>;
       openFile: (options: { title: string; filters?: any[] }) => Promise<{ path: string; content: string; name: string } | null>;
+      openFiles: (options: { title: string; filters?: any[] }) => Promise<{ path: string; content: string; name: string }[]>;
 
       // Whisper audio transcription via main process
       whisperTranscribe: (audioBuffer: ArrayBuffer, apiKey: string, endpoint: string) =>

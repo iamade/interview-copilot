@@ -24,6 +24,7 @@ export default function SetupPanel({
   const [activeTab, setActiveTab] = useState<'context' | 'model'>('context');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const pendingFieldRef = useRef<'resumeText' | 'jobDescription' | 'stories'>('resumeText');
+  const prepDocsInputRef = useRef<HTMLInputElement>(null);
 
   async function handleFileUpload(field: 'resumeText' | 'jobDescription' | 'stories') {
     const api = window.electronAPI;
@@ -91,6 +92,59 @@ export default function SetupPanel({
     }
   }
 
+  async function handlePrepDocsUpload() {
+    const api = window.electronAPI;
+
+    if (api?.openFiles) {
+      try {
+        const results = await api.openFiles({
+          title: 'Select Interview Prep Docs',
+          filters: [{ name: 'Documents', extensions: ['txt', 'md', 'pdf', 'docx'] }],
+        });
+        if (results.length > 0) {
+          onUpdateContext({
+            ...userContext,
+            prepDocs: [...userContext.prepDocs, ...results.map((r) => ({ name: r.name, content: r.content }))],
+          });
+        }
+      } catch (err) {
+        console.error('Electron multi-file dialog failed, falling back to web picker:', err);
+        prepDocsInputRef.current?.click();
+      }
+    } else {
+      prepDocsInputRef.current?.click();
+    }
+  }
+
+  async function handlePrepDocsWebChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const newDocs = await Promise.all(
+      files.map(async (file) => {
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        let content = '';
+        if (ext === 'txt' || ext === 'md') {
+          content = await file.text();
+        } else if (ext === 'docx') {
+          content = await extractDocxText(file);
+        } else if (ext === 'pdf') {
+          content = `[PDF file: ${file.name}]\nPlease copy-paste the text from your PDF instead, or use a .txt/.md/.docx file.`;
+        } else {
+          content = await file.text();
+        }
+        return { name: file.name, content };
+      })
+    );
+
+    onUpdateContext({ ...userContext, prepDocs: [...userContext.prepDocs, ...newDocs] });
+    if (prepDocsInputRef.current) prepDocsInputRef.current.value = '';
+  }
+
+  function removePrepDoc(index: number) {
+    onUpdateContext({ ...userContext, prepDocs: userContext.prepDocs.filter((_, i) => i !== index) });
+  }
+
   async function extractDocxText(file: File): Promise<string> {
     // Read DOCX as ArrayBuffer, find document.xml in the zip, strip XML tags
     const arrayBuffer = await file.arrayBuffer();
@@ -151,6 +205,15 @@ export default function SetupPanel({
         type="file"
         accept=".txt,.md,.docx,.pdf"
         onChange={handleWebFileChange}
+        className="hidden"
+      />
+      {/* Hidden multi-file input for web fallback — prep docs */}
+      <input
+        ref={prepDocsInputRef}
+        type="file"
+        accept=".txt,.md,.docx,.pdf"
+        multiple
+        onChange={handlePrepDocsWebChange}
         className="hidden"
       />
 
@@ -283,6 +346,41 @@ export default function SetupPanel({
               rows={2}
               className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs placeholder-gray-600 focus:outline-none focus:border-blue-500/50 resize-none"
             />
+          </div>
+
+          {/* Prep Docs — company research, past Q&A, cheat sheets, etc. Checked by the LLM before it gives talking points. */}
+          <div>
+            <div className="flex items-center justify-between mb-0.5">
+              <label className="text-[9px] text-gray-500 uppercase tracking-wider">Prep Docs</label>
+              <button
+                onClick={handlePrepDocsUpload}
+                className="text-[9px] text-blue-400 hover:text-blue-300 transition-all"
+              >
+                📁 Upload
+              </button>
+            </div>
+            {userContext.prepDocs.length === 0 ? (
+              <div className="text-[9px] text-gray-600 px-2 py-1.5 rounded-lg bg-gray-800/40 border border-gray-700/40">
+                No prep docs uploaded. The AI checks these before answering.
+              </div>
+            ) : (
+              <div className="flex flex-col gap-1">
+                {userContext.prepDocs.map((doc, i) => (
+                  <div
+                    key={`${doc.name}-${i}`}
+                    className="flex items-center justify-between px-2 py-1 rounded-lg bg-gray-800/60 border border-gray-700/40"
+                  >
+                    <span className="text-[10px] text-gray-300 truncate">{doc.name}</span>
+                    <button
+                      onClick={() => removePrepDoc(i)}
+                      className="text-[9px] text-red-400 hover:text-red-300 ml-2 shrink-0"
+                    >
+                      ✕
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Additional notes */}
