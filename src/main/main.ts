@@ -499,6 +499,37 @@ ipcMain.handle('capture:screenshot', async () => {
   return null;
 });
 
+// List open windows for the candidate to pick from (P0 fix 1.4).
+// Seun's test: "the app could not read the code on screen" because the
+// capture defaulted to the full screen, which on most interview setups
+// includes the video call, the prep doc, etc. — VS Code is somewhere in
+// the background. Letting the candidate pick a specific window is the
+// cheap fix that unlocks the coding round.
+ipcMain.handle('capture:listWindows', async () => {
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: 320, height: 200 },
+  });
+  return sources.map((s) => ({
+    id: s.id,
+    name: s.name,
+    // thumbnail is a NativeImage — toDataURL returns data:image/png;base64,...
+    thumbnail: s.thumbnail.toDataURL(),
+  }));
+});
+
+// Capture a specific window by its desktopCapturer source id.
+ipcMain.handle('capture:window', async (_event, sourceId: string) => {
+  if (!sourceId) return null;
+  const sources = await desktopCapturer.getSources({
+    types: ['window'],
+    thumbnailSize: { width: 1920, height: 1080 },
+  });
+  const target = sources.find((s) => s.id === sourceId);
+  if (!target) return null;
+  return target.thumbnail.toPNG().toString('base64');
+});
+
 // System audio capture - get available audio sources
 ipcMain.handle('capture:getAudioSources', async () => {
   const sources = await desktopCapturer.getSources({ types: ['window', 'screen'] });

@@ -198,32 +198,52 @@ async function callAnthropic(messages: Message[], config: LLMConfig): Promise<LL
   const systemMsg = messages.find((m) => m.role === 'system');
   const conversationMsgs = messages.filter((m) => m.role !== 'system');
 
-  const anthropicMessages = conversationMsgs.map((m) => {
-    if (typeof m.content === 'string') {
-      return { role: m.role, content: m.content };
-    }
-    return {
-      role: m.role,
-      content: (m.content as ContentPart[]).map((part) => {
-        if (part.type === 'text') return { type: 'text' as const, text: part.text! };
-        if (part.type === 'image_url') {
-          const dataUrl = part.image_url!.url;
-          const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
-          if (base64Match) {
-            return {
-              type: 'image' as const,
-              source: {
-                type: 'base64' as const,
-                media_type: `image/${base64Match[1]}` as any,
-                data: base64Match[2],
-              },
-            };
+  // Filter out any messages with empty content — Anthropic 400s on
+  // "User message must have non-empty content" if a part maps to {type:'text',text:''}.
+  // (Failure 1.1 in the Seun test — long interviewer questions would silently
+  // produce an image part with no base64 and break the request.)
+  const sanitizedConv = conversationMsgs
+    .map((m) => {
+      if (typeof m.content === 'string') {
+        return { role: m.role, content: m.content };
+      }
+      const parts = (m.content as ContentPart[])
+        .map((part) => {
+          if (part.type === 'text') {
+            const t = (part.text || '').trim();
+            return t ? { type: 'text' as const, text: t } : null;
           }
-        }
-        return { type: 'text' as const, text: '' };
-      }),
-    };
-  });
+          if (part.type === 'image_url') {
+            const dataUrl = part.image_url!.url;
+            const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
+            if (base64Match) {
+              return {
+                type: 'image' as const,
+                source: {
+                  type: 'base64' as const,
+                  media_type: `image/${base64Match[1]}` as any,
+                  data: base64Match[2],
+                },
+              };
+            }
+            return null;
+          }
+          return null;
+        })
+        .filter((p): p is NonNullable<typeof p> => p !== null);
+      return { role: m.role, content: parts };
+    })
+    // Drop messages that became empty after sanitization.
+    .filter((m) => {
+      if (typeof m.content === 'string') return m.content.trim().length > 0;
+      return (m.content as any[]).length > 0;
+    });
+
+  if (sanitizedConv.length === 0) {
+    throw new Error('Anthropic: all user messages were empty after sanitization');
+  }
+
+  const anthropicMessages = sanitizedConv;
 
   const data = await corsFetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -663,10 +683,48 @@ export async function streamLLM(
     const systemMsg = messages.find((m) => m.role === 'system');
     const conversationMsgs = messages.filter((m) => m.role !== 'system');
 
-    const anthropicMessages = conversationMsgs.map((m) => ({
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : m.content,
-    }));
+    // Sanitize: drop empty content parts/blocks (issue 1.1 — Anthropic 400s otherwise)
+    const anthropicMessages = conversationMsgs
+      .map((m) => {
+        if (typeof m.content === 'string') {
+          const t = m.content.trim();
+          return t ? { role: m.role, content: t } : null;
+        }
+        const parts = (m.content as ContentPart[])
+          .map((part) => {
+            if (part.type === 'text') {
+              const t = (part.text || '').trim();
+              return t ? { type: 'text' as const, text: t } : null;
+            }
+            if (part.type === 'image_url') {
+              const dataUrl = part.image_url!.url;
+              const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
+              if (base64Match) {
+                return {
+                  type: 'image' as const,
+                  source: {
+                    type: 'base64' as const,
+                    media_type: `image/${base64Match[1]}` as any,
+                    data: base64Match[2],
+                  },
+                };
+              }
+              return null;
+            }
+            return null;
+          })
+          .filter((p): p is NonNullable<typeof p> => p !== null);
+        return { role: m.role, content: parts };
+      })
+      .filter((m): m is NonNullable<typeof m> => m !== null)
+      .filter((m) => {
+        if (typeof m.content === 'string') return m.content.trim().length > 0;
+        return (m.content as any[]).length > 0;
+      });
+
+    if (anthropicMessages.length === 0) {
+      throw new Error('Anthropic: all user messages were empty after sanitization');
+    }
 
     let fullText = '';
 
@@ -730,4 +788,123 @@ export async function streamLLM(
     onChunk(result.text);
     onDone(result);
   }
+}
+
+// ── Fallback model chain (P0 fix 1.6) ──
+// If the primary provider errors out (rate limit, 400 empty content, network
+// blip), automatically retry on a backup model. The user shouldn't have to
+// manually swap providers mid-interview — Seun called this out in the test
+// ("I need fall back, because if one agent no go reply, it will fall back
+// to the other model"). Per Ade 2026-08-06 10:25 MDT: bundle with the P0
+// fixes; Anthropic credits passed $1000 so we keep Anthropic as primary when
+// possible but use MiniMax as the cheap insurance.
+//
+// Default fallback order: MiniMax M3 (1M context, cheap, fast) → Ollama cloud
+// deepseek-v4-pro (free, no key needed if the ollama endpoint is configured).
+// Tunable: pass `customFallbackChain` to override.
+
+export interface FallbackStep {
+  provider: LLMProvider;
+  model: string;
+  /** Provider key in apiKeys whose presence enables this fallback. Use
+   *  'ollama' which is free and doesn't need a real key. */
+  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'none';
+  /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. */
+  endpoint?: string;
+}
+
+export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
+  { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
+  { provider: 'ollama', model: 'deepseek-v4-pro', needsKey: 'none', endpoint: 'https://api.ollama.com' },
+];
+
+/**
+ * Call LLM with automatic fallback. Tries the primary config first; on any
+ * thrown error, walks the fallback chain and returns the first success.
+ * The full chain is logged so the user can see which provider actually
+ * answered (the rendered answer doesn't say "I fell back" — the fallback is
+ * transparent to the interviewer).
+ */
+export async function callLLMWithFallback(
+  messages: Message[],
+  primaryConfig: LLMConfig,
+  apiKeys: Record<string, string> = {},
+  customEndpoints: Record<string, string> = {},
+  fallbackChain: FallbackStep[] = DEFAULT_FALLBACK_CHAIN
+): Promise<LLMResponse> {
+  try {
+    return await callLLM(messages, primaryConfig);
+  } catch (primaryError: any) {
+    const primaryMsg = primaryError?.message || String(primaryError);
+    console.warn(`[LLM] Primary ${primaryConfig.provider}/${primaryConfig.model} failed: ${primaryMsg}. Trying fallback chain.`);
+
+    for (const step of fallbackChain) {
+      // Skip if a required key is missing
+      if (step.needsKey !== 'none') {
+        const key = apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '');
+        if (!key) {
+          console.log(`[LLM] Skipping fallback ${step.provider}/${step.model} — no API key for ${step.needsKey}`);
+          continue;
+        }
+      }
+      // Don't retry on the same provider/model as the primary
+      if (step.provider === primaryConfig.provider && step.model === primaryConfig.model) continue;
+
+      const fallbackConfig: LLMConfig = {
+        provider: step.provider,
+        model: step.model,
+        apiKey: step.needsKey === 'none' ? '' : (apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '')),
+        endpoint: step.endpoint || customEndpoints[step.provider] || undefined,
+        temperature: primaryConfig.temperature,
+        maxTokens: primaryConfig.maxTokens,
+      };
+
+      try {
+        const result = await callLLM(messages, fallbackConfig);
+        console.log(`[LLM] Fallback succeeded: ${step.provider}/${step.model}`);
+        return result;
+      } catch (fallbackError: any) {
+        const msg = fallbackError?.message || String(fallbackError);
+        console.warn(`[LLM] Fallback ${step.provider}/${step.model} also failed: ${msg}`);
+      }
+    }
+
+    // All fallbacks failed — re-throw the primary error so the UI surfaces it
+    throw new Error(`Primary ${primaryConfig.provider} failed: ${primaryMsg}. All ${fallbackChain.length} fallbacks also failed.`);
+  }
+}
+
+/**
+ * Streaming LLM with fallback. Tries to stream the primary (only Anthropic
+ * is streamable via IPC today). If the stream errors out OR the primary is
+ * non-Anthropic, falls back to non-streaming callLLMWithFallback so the user
+ * still gets an answer — just delivered in one chunk.
+ */
+export async function streamLLMWithFallback(
+  messages: Message[],
+  primaryConfig: LLMConfig,
+  apiKeys: Record<string, string> = {},
+  customEndpoints: Record<string, string> = {},
+  fallbackChain: FallbackStep[] = DEFAULT_FALLBACK_CHAIN,
+  onChunk: (text: string) => void,
+  onDone: (full: LLMResponse) => void
+): Promise<void> {
+  const api = (window as any).electronAPI;
+
+  // Only Anthropic is streamable; everything else is non-streaming.
+  if (primaryConfig.provider === 'anthropic' && api?.fetchStream) {
+    try {
+      await streamLLM(messages, primaryConfig, onChunk, onDone);
+      return;
+    } catch (streamError: any) {
+      const msg = streamError?.message || String(streamError);
+      console.warn(`[LLM] Anthropic stream failed: ${msg}. Falling back to non-streaming chain.`);
+      // Fall through to non-streaming path
+    }
+  }
+
+  // Non-streaming path: primary + fallback chain.
+  const result = await callLLMWithFallback(messages, primaryConfig, apiKeys, customEndpoints, fallbackChain);
+  onChunk(result.text);
+  onDone(result);
 }

@@ -27,6 +27,15 @@ class AudioCaptureService {
   private whisperEndpoint: string = 'http://localhost:18799/v1/audio/transcriptions';
   private transcriptionMode: 'browser' | 'whisper' = 'whisper';
   private chunkInterval: ReturnType<typeof setInterval> | null = null;
+  // P0 fix 1.2 — extend chunk duration from 8s to 10s. Seun flagged that
+  // "the recognizer was just picking the last" of what the interviewer said
+  // when the question spanned a chunk boundary. Longer chunks = fewer
+  // boundaries = less word loss, at the cost of ~2s of latency. (10s is
+  // still under the typical interviewer-pause window.)
+  // NOTE: a full AudioWorklet-based pre-roll overlap (encode last 1.5s +
+  // next 8.5s) is the proper fix; left for v1.1 since it needs Worklet
+  // plumbing on the main process side.
+  private chunkDurationMs = 10000;
   // Real-time audio level metering via Web Audio API. Lets the UI show
   // whether system audio is actually being captured (vs. silent / blocked).
   private audioContext: AudioContext | null = null;
@@ -309,17 +318,16 @@ class AudioCaptureService {
 
     // Start recording (no timeslice — we control chunks via stop/start)
     this.mediaRecorder.start();
-    console.log('[AudioService] Whisper: MediaRecorder started, will cycle every 8s');
+    console.log(`[AudioService] Whisper: MediaRecorder started, will cycle every ${this.chunkDurationMs / 1000}s`);
 
-    // Eight-second chunks reduce word loss at recorder boundaries while keeping
-    // the answer latency low enough for a live interview.
+    // 10s chunks (P0 fix 1.2 — was 8s; longer chunks = fewer word-loss boundaries).
     // Stop the recorder to trigger ondataavailable with a
     // complete valid WebM file, then ondataavailable restarts it.
     this.chunkInterval = setInterval(() => {
       if (this.mediaRecorder && this.mediaRecorder.state === 'recording') {
         this.mediaRecorder.stop();
       }
-    }, 8000);
+    }, this.chunkDurationMs);
   }
 
   private async transcribeWithWhisper(audioBlob: Blob): Promise<void> {

@@ -15,6 +15,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Capture
   takeScreenshot: () => ipcRenderer.invoke('capture:screenshot'),
   getAudioSources: () => ipcRenderer.invoke('capture:getAudioSources'),
+  // P0 fix 1.4 — let the candidate pick a specific window to capture
+  // (VS Code, LeetCode, etc.) instead of always grabbing the whole screen.
+  listWindows: () => ipcRenderer.invoke('capture:listWindows'),
+  captureWindow: (sourceId: string) => ipcRenderer.invoke('capture:window', sourceId),
 
   // File dialog
   openFile: (options: { title: string; filters?: any[] }) => ipcRenderer.invoke('dialog:openFile', options),

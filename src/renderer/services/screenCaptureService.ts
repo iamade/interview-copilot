@@ -8,10 +8,19 @@ export interface ScreenCapture {
   timestamp: number;
 }
 
+export interface WindowSource {
+  id: string;
+  name: string;
+  thumbnail: string; // data:image/png;base64,...
+}
+
 class ScreenCaptureService {
   private captureInterval: ReturnType<typeof setInterval> | null = null;
   private isCapturing = false;
   private lastCapture: ScreenCapture | null = null;
+  // P0 fix 1.4 — remember which window the candidate picked so repeat
+  // captures in the same session don't make them re-pick.
+  private pickedWindowId: string | null = null;
 
   // Take a single screenshot via Electron's desktopCapturer
   async takeScreenshot(): Promise<ScreenCapture | null> {
@@ -35,6 +44,54 @@ class ScreenCaptureService {
       console.error('Screenshot failed:', error);
       return null;
     }
+  }
+
+  // P0 fix 1.4 — list the candidate's open windows so they can pick the
+  // coding window (VS Code, LeetCode, browser, etc.) instead of always
+  // grabbing the whole screen.
+  async listWindows(): Promise<WindowSource[]> {
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (!electronAPI?.listWindows) {
+        console.error('electronAPI.listWindows not available');
+        return [];
+      }
+      return await electronAPI.listWindows();
+    } catch (error) {
+      console.error('listWindows failed:', error);
+      return [];
+    }
+  }
+
+  // P0 fix 1.4 — capture a specific window by its desktopCapturer id.
+  async captureWindow(sourceId: string): Promise<ScreenCapture | null> {
+    try {
+      const electronAPI = (window as any).electronAPI;
+      if (!electronAPI?.captureWindow) {
+        console.error('electronAPI.captureWindow not available');
+        return null;
+      }
+      const base64 = await electronAPI.captureWindow(sourceId);
+      if (!base64) return null;
+      this.pickedWindowId = sourceId;
+      this.lastCapture = { base64, timestamp: Date.now() };
+      return this.lastCapture;
+    } catch (error) {
+      console.error('captureWindow failed:', error);
+      return null;
+    }
+  }
+
+  // Convenience: re-capture the previously picked window (or full screen
+  // if nothing was picked yet).
+  async recapturePickedOrScreen(): Promise<ScreenCapture | null> {
+    if (this.pickedWindowId) {
+      const result = await this.captureWindow(this.pickedWindowId);
+      if (result) return result;
+      // Window might have closed — fall back to full screen.
+      this.pickedWindowId = null;
+    }
+    return this.takeScreenshot();
   }
 
   // Use LLM vision to analyze the screenshot for coding questions

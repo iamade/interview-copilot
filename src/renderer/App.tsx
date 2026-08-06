@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { AppMode, ConversationEntry, UserContext, SettingsState } from './types';
 import type { LLMConfig, LLMProvider } from './services/llmService';
-import { streamLLM, callLLM, PROVIDER_MODELS } from './services/llmService';
+import { streamLLM, streamLLMWithFallback, callLLM, PROVIDER_MODELS } from './services/llmService';
 import { audioService, type TranscriptionChunk } from './services/audioService';
 import { screenCaptureService } from './services/screenCaptureService';
 import OverlayHeader from './components/OverlayHeader';
@@ -226,9 +226,12 @@ export default function App() {
       setIsMinimized(false);
       setStealthMode(false);
 
-      await streamLLM(
+      await streamLLMWithFallback(
         messages,
         getLLMConfig(),
+        settings.apiKeys,
+        settings.customEndpoints,
+        undefined, // use DEFAULT_FALLBACK_CHAIN
         (chunk) => setSuggestedAnswer((prev) => prev + chunk),
         (response) => {
           setIsGenerating(false);
@@ -240,6 +243,14 @@ export default function App() {
             type: 'suggestion',
           };
           setConversation((prev) => [...prev, answerEntry]);
+          // P0 fix 1.3 — auto-hide the overlay ~4s after the answer is
+          // complete. Reduces the window during which the interviewer can
+          // notice the candidate's eyes flickering to the side. Candidate
+          // can summon it back instantly with Cmd+Shift+I.
+          setTimeout(() => {
+            const api = (window as any).electronAPI;
+            api?.toggleOverlay?.();
+          }, 4000);
         }
       );
     } catch (e: any) {
