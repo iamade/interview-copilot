@@ -11,13 +11,15 @@ import SetupPanel from './components/SetupPanel';
 import SettingsPanel from './components/SettingsPanel';
 
 const DEFAULT_SETTINGS: SettingsState = {
-  // Default = Ollama Cloud deepseek-v4-pro (free, key seeded from .env at startup).
-  // This is the verified-working free path. NOTE: the OpenClaw *local* gateway on
-  // :18789 is a WebSocket-RPC control panel, NOT an OpenAI HTTP inference endpoint;
-  // gateway_ollama / featherless remain selectable but need a real OpenAI-compatible
-  // gateway URL (Settings → OpenClaw Gateway Endpoint) before they will answer.
-  provider: 'ollama',
-  model: 'deepseek-v4-pro',
+  // Default = Anthropic Claude Sonnet 5 (per Ade 2026-08-06 11:18 MDT: "anthropic
+  // to be the default model and all others are fallbacks that automatically catch
+  // if anthropic fails"). Anthropic has $1000+ credit per the Seun-test briefing;
+  // Sonnet 5 is the "Fast" tier — sub-second first token, $5/$25 per 1M, good
+  // interview-quality answers. Fallback chain (in llmService.ts) automatically
+  // walks MiniMax-M3 → Ollama cloud deepseek-v4-pro if Anthropic errors.
+  // The Ollama / OpenClaw / MiniMax providers remain selectable in Settings.
+  provider: 'anthropic',
+  model: 'claude-sonnet-5',
   apiKeys: {},
   ollamaEndpoint: 'https://api.ollama.com',
   customEndpoints: {},
@@ -74,9 +76,24 @@ export default function App() {
       if (!api) return;
       const stored = await api.getAllStore();
       if (stored) {
-        const storedProvider: LLMProvider =
+        // Migration 2026-08-06 11:18 MDT: upgrade existing installs that were
+        // pinned to the old default (Ollama cloud deepseek-v4-pro) over to the
+        // new default (Anthropic Claude Sonnet 5). Anthropic is the primary
+        // per Ade's directive; the fallback chain (in llmService.ts) catches
+        // any Anthropic failure with MiniMax-M3 → Ollama cloud. We only
+        // auto-upgrade if the user had NEVER changed the default — if they
+        // explicitly picked Ollama or any other provider/model, leave it alone.
+        let storedProvider: LLMProvider =
           (stored.llmProvider as LLMProvider) || (DEFAULT_SETTINGS.provider as LLMProvider);
-        const storedModel: string = stored.llmModel || DEFAULT_SETTINGS.model;
+        let storedModel: string = stored.llmModel || DEFAULT_SETTINGS.model;
+        if (storedProvider === 'ollama' && storedModel === 'deepseek-v4-pro') {
+          console.log('[App] Migrating: ollama/deepseek-v4-pro → anthropic/claude-sonnet-5 (P0 default upgrade 2026-08-06)');
+          storedProvider = 'anthropic';
+          storedModel = 'claude-sonnet-5';
+          // Persist the migration so the upgrade is one-shot.
+          api.setStore('llmProvider', storedProvider);
+          api.setStore('llmModel', storedModel);
+        }
 
         // Migration: if the stored model no longer exists in the catalog
         // (e.g. 'claude-opus-5' was renamed to 'claude-opus-4-5-20251101'),
