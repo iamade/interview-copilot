@@ -232,7 +232,18 @@ export default function InterviewMode({
             className="flex-1 overflow-y-auto px-3 py-2 text-gray-200 leading-relaxed min-h-0"
             style={{ fontSize: fontSize }}
           >
-            <div className="prose prose-invert prose-sm max-w-none [&_h1]:text-sm [&_h1]:font-bold [&_h1]:mb-1 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:mb-1 [&_h2]:mt-2 [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mb-1.5 [&_p]:leading-relaxed [&_ul]:my-1 [&_ul]:pl-4 [&_li]:mb-0.5 [&_li]:text-gray-200 [&_strong]:text-white [&_blockquote]:border-l-2 [&_blockquote]:border-blue-500/40 [&_blockquote]:pl-2 [&_blockquote]:text-gray-300 [&_code]:bg-gray-700/60 [&_code]:px-1 [&_code]:rounded [&_code]:text-blue-300" dangerouslySetInnerHTML={{ __html: renderedAnswer }} />
+            {/* Immediate feedback placeholder — the LLM is being called,
+                first token can take 1-3s. Show "Thinking..." + a spinner
+                so the candidate knows something is happening (otherwise
+                the gap between click and first chunk feels like a hang). */}
+            {!renderedAnswer && isGenerating ? (
+              <div className="flex items-center gap-2 text-gray-500 text-sm italic">
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 pulse-dot" />
+                Thinking…
+              </div>
+            ) : (
+              <div className="prose prose-invert prose-sm max-w-none [&_h1]:text-sm [&_h1]:font-bold [&_h1]:mb-1 [&_h2]:text-xs [&_h2]:font-bold [&_h2]:mb-1 [&_h2]:mt-2 [&_h3]:text-xs [&_h3]:font-semibold [&_p]:mb-1.5 [&_p]:leading-relaxed [&_ul]:my-1 [&_ul]:pl-4 [&_li]:mb-0.5 [&_li]:text-gray-200 [&_strong]:text-white [&_blockquote]:border-l-2 [&_blockquote]:border-blue-500/40 [&_blockquote]:pl-2 [&_blockquote]:text-gray-300 [&_code]:bg-gray-700/60 [&_code]:px-1 [&_code]:rounded [&_code]:text-blue-300" dangerouslySetInnerHTML={{ __html: renderedAnswer }} />
+            )}
             {isGenerating && <span className="inline-block w-1.5 h-3 bg-blue-400 ml-0.5 pulse-dot" />}
           </div>
         </div>

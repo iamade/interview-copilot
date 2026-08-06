@@ -243,14 +243,15 @@ export default function App() {
             type: 'suggestion',
           };
           setConversation((prev) => [...prev, answerEntry]);
-          // P0 fix 1.3 — auto-hide the overlay ~4s after the answer is
-          // complete. Reduces the window during which the interviewer can
-          // notice the candidate's eyes flickering to the side. Candidate
-          // can summon it back instantly with Cmd+Shift+I.
-          setTimeout(() => {
-            const api = (window as any).electronAPI;
-            api?.toggleOverlay?.();
-          }, 4000);
+          // P0 fix 1.3 — auto-hide DISABLED. The 4s timer I shipped in the
+          // first P0 batch was too aggressive: the candidate needs to read
+          // the answer, and the overlay vanishing mid-interview was
+          // indistinguishable from a crash. Stealth-hide is now manual
+          // (click 👁 in the header, or Cmd+Shift+I global shortcut).
+          // The interviewer-noticing-eye-movement concern is mitigated by
+          // the candidate glancing at the overlay, not staring — but if
+          // that becomes an issue, the candidate can hit the header Hide
+          // button or Cmd+Shift+I.
         }
       );
     } catch (e: any) {
@@ -420,6 +421,12 @@ RULES:
         onMinimize={() => setIsMinimized(true)}
         onStealth={() => setStealthMode(true)}
         onSettings={() => setMode(mode === 'settings' ? 'idle' : 'settings')}
+        onHideOverlay={() => {
+          // Manual hide (stealth for the interviewer). Cmd+Shift+I brings
+          // it back. Replaces the old 4s auto-hide that was too aggressive.
+          const api = (window as any).electronAPI;
+          api?.toggleOverlay?.();
+        }}
       />
 
       <div className="flex-1 overflow-y-auto p-3 min-h-0" style={{ fontSize: settings.fontSize }}>
