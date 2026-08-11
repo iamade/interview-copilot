@@ -17,12 +17,16 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
     "@google/genai": "^1.38.0",
+    "@types/uuid": "^10.0.0",
     "adm-zip": "^0.5.17",
+    "better-sqlite3": "^13.0.3",
     "electron-store": "^8.1.0",
     "marked": "^15.0.0",
-    "openai": "^4.77.0"
+    "openai": "^4.77.0",
+    "uuid": "^14.0.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

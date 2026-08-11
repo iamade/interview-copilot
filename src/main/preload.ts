@@ -50,4 +50,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('fetch:stream-done', handler);
     return () => ipcRenderer.removeListener('fetch:stream-done', handler);
   },
+
+  // ── Q&A persistence (AFD-166) ──
+  // SQLite-backed session log in userData/interview-copilot.db.
+  // `role` ∈ 'interviewer' | 'me' | 'system' | 'tool' (CHECK constraint
+  // enforced in the DB; renderer-side whitelist in App.tsx).
+  ensureSession: (): Promise<string> => ipcRenderer.invoke('qa:ensureSession'),
+  newSession: (): Promise<string> => ipcRenderer.invoke('qa:newSession'),
+  getCurrentSession: (): Promise<string | null> => ipcRenderer.invoke('qa:getCurrentSession'),
+  setCurrentSession: (sessionId: string): Promise<string> => ipcRenderer.invoke('qa:setCurrentSession', sessionId),
+  addQa: (payload: { session_id: string; role: string; text: string; meta?: Record<string, any> | null }): Promise<{ id: number }> =>
+    ipcRenderer.invoke('qa:add', payload),
+  listQaBySession: (sessionId: string): Promise<any[]> => ipcRenderer.invoke('qa:listBySession', sessionId),
+  listAllQa: (limit?: number): Promise<any[]> => ipcRenderer.invoke('qa:listAll', limit),
+  listSessions: (limit?: number): Promise<any[]> => ipcRenderer.invoke('qa:listSessions', limit),
+  deleteQa: (id: number): Promise<{ ok: boolean }> => ipcRenderer.invoke('qa:delete', id),
+  clearSession: (sessionId: string): Promise<{ deleted: number }> => ipcRenderer.invoke('qa:clearSession', sessionId),
+  countQaBySession: (sessionId: string): Promise<{ count: number }> => ipcRenderer.invoke('qa:countBySession', sessionId),
 });

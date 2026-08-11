@@ -19,6 +19,11 @@ interface Props {
   fontSize: number;
   audioLevel?: number;
   audioSilentSeconds?: number;
+  // AFD-166: session controls + per-entry delete
+  sessionId?: string | null;
+  onNewSession?: () => void;
+  onClearSession?: () => void;
+  onDeleteQa?: (localId: string) => void;
 }
 
 export default function InterviewMode({
@@ -36,6 +41,10 @@ export default function InterviewMode({
   fontSize,
   audioLevel = 0,
   audioSilentSeconds = 0,
+  sessionId,
+  onNewSession,
+  onClearSession,
+  onDeleteQa,
 }: Props) {
   const [manualInput, setManualInput] = useState('');
   const [showHistory, setShowHistory] = useState(false);
@@ -186,26 +195,69 @@ export default function InterviewMode({
         </button>
       </form>
 
-      {/* Conversation history (collapsible) */}
-      {showHistory && conversation.length > 0 && (
-        <div ref={historyRef} className="max-h-32 overflow-y-auto rounded-lg bg-gray-900/60 border border-gray-800/40 p-2 fade-in">
-          <div className="text-[9px] text-gray-500 mb-1.5 uppercase tracking-wider">Conversation</div>
-          {conversation.map((entry) => (
-            <div key={entry.id} className="mb-1.5 last:mb-0">
-              <span
-                className={`text-[9px] font-medium ${
-                  entry.speaker === 'interviewer'
-                    ? 'text-orange-400'
-                    : entry.speaker === 'ai'
-                    ? 'text-blue-400'
-                    : 'text-green-400'
-                }`}
-              >
-                {entry.speaker === 'interviewer' ? 'Q' : entry.speaker === 'ai' ? 'AI' : 'You'}:
-              </span>
-              <span className="text-gray-400 text-[10px] ml-1 line-clamp-2">{entry.text}</span>
+      {/* Conversation history (collapsible) + AFD-166 session controls */}
+      {(showHistory || sessionId) && (
+        <div className="rounded-lg bg-gray-900/40 border border-gray-800/40 p-2 fade-in">
+          {/* Session controls row — always visible when sessionId is set */}
+          {sessionId && (
+            <div className="flex items-center justify-between mb-1.5 pb-1.5 border-b border-gray-800/40">
+              <div className="text-[9px] text-gray-500 truncate font-mono">
+                <span className="text-gray-600">session:</span> {sessionId.slice(0, 8)}…
+              </div>
+              <div className="flex gap-1 shrink-0">
+                {onNewSession && (
+                  <button
+                    onClick={onNewSession}
+                    title="Start a new session (rotates the UUID, clears the chat list)"
+                    className="px-1.5 py-0.5 rounded bg-emerald-700/40 hover:bg-emerald-700/70 text-emerald-300 text-[9px] font-medium transition-all"
+                  >
+                    ＋ New
+                  </button>
+                )}
+                {onClearSession && conversation.length > 0 && (
+                  <button
+                    onClick={onClearSession}
+                    title="Delete ALL Q&A in the current session (cannot be undone)"
+                    className="px-1.5 py-0.5 rounded bg-red-700/40 hover:bg-red-700/70 text-red-300 text-[9px] font-medium transition-all"
+                  >
+                    🗑 Clear
+                  </button>
+                )}
+              </div>
             </div>
-          ))}
+          )}
+          {showHistory && conversation.length > 0 && (
+            <div ref={historyRef} className="max-h-32 overflow-y-auto">
+              <div className="text-[9px] text-gray-500 mb-1.5 uppercase tracking-wider">Conversation</div>
+              {conversation.map((entry) => (
+                <div key={entry.id} className="mb-1.5 last:mb-0 flex items-start gap-1.5 group">
+                  <div className="flex-1 min-w-0">
+                    <span
+                      className={`text-[9px] font-medium ${
+                        entry.speaker === 'interviewer'
+                          ? 'text-orange-400'
+                          : entry.speaker === 'ai'
+                          ? 'text-blue-400'
+                          : 'text-green-400'
+                      }`}
+                    >
+                      {entry.speaker === 'interviewer' ? 'Q' : entry.speaker === 'ai' ? 'AI' : 'You'}:
+                    </span>
+                    <span className="text-gray-400 text-[10px] ml-1 line-clamp-2">{entry.text}</span>
+                  </div>
+                  {onDeleteQa && (
+                    <button
+                      onClick={() => onDeleteQa(entry.id)}
+                      title="Delete this Q&A entry"
+                      className="opacity-0 group-hover:opacity-100 text-red-400 hover:text-red-200 text-[11px] leading-none transition-all shrink-0"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -60,6 +60,14 @@ export default function App() {
   const [isMinimized, setIsMinimized] = useState(false);
   const [stealthMode, setStealthMode] = useState(false);
 
+  // ── AFD-166: SQLite persistence (Mavis lane, p0) ──
+  // `sessionId` = the current interview session (UUID v4, persisted in
+  // electron-store). `qaDbIds` = local React id → SQLite row id map, so
+  // we can call qa:delete with the right row id. Both are populated on
+  // mount by loadQaFromDb() (which calls qa:ensureSession + qa:listBySession).
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [qaDbIds, setQaDbIds] = useState<Record<string, number>>({});
+
   const transcriptBuffer = useRef('');
   const silenceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [audioLevel, setAudioLevel] = useState(0);
@@ -68,6 +76,12 @@ export default function App() {
   // Load saved settings on mount
   useEffect(() => {
     loadSettings();
+  }, []);
+
+  // AFD-166: load the current session id + hydrate conversation from SQLite
+  // so the user never loses Q&A across renderer reloads or app restarts.
+  useEffect(() => {
+    loadQaFromDb();
   }, []);
 
   async function loadSettings() {
@@ -124,6 +138,116 @@ export default function App() {
       }
     } catch (e) {
       console.error('Failed to load settings:', e);
+    }
+  }
+
+  // AFD-166: hydrate the conversation from SQLite. Called on mount. If the
+  // SQLite DB is empty or unreachable, the in-memory conversation stays empty
+  // and the user can still chat (writes are best-effort after that).
+  async function loadQaFromDb() {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      const sid = await api.ensureSession();
+      setSessionId(sid);
+      const rows = await api.listQaBySession(sid);
+      if (rows && rows.length > 0) {
+        const idMap: Record<string, number> = {};
+        const rehydrated: ConversationEntry[] = rows.map((r: any) => {
+          const localId = `${r.id}-${r.ts}`;
+          idMap[localId] = r.id;
+          return {
+            id: localId,
+            timestamp: r.ts,
+            speaker: r.role === 'interviewer' ? 'interviewer' : 'ai',
+            text: r.text,
+            type: r.role === 'interviewer' ? 'question' : 'suggestion',
+          };
+        });
+        setQaDbIds(idMap);
+        setConversation(rehydrated);
+        console.log(`[App] Rehydrated ${rehydrated.length} Q&A from session ${sid.slice(0, 8)}…`);
+      }
+    } catch (e) {
+      console.error('[App] Failed to load Q&A from DB:', e);
+    }
+  }
+
+  // AFD-166: fire-and-forget write to SQLite. Best-effort — if the DB is
+  // down we still keep the in-memory conversation so the interview doesn't
+  // grind to a halt. The meta includes provider/model/latency so we can
+  // audit answer speed later. `dbRole` uses the schema's CHECK whitelist
+  // ('interviewer' | 'me' | 'system' | 'tool') — the React speaker 'ai'
+  // maps to DB role 'me' since the AI's answer is what the candidate would
+  // paraphrase aloud.
+  async function persistQa(
+    sid: string,
+    dbRole: 'interviewer' | 'me' | 'system' | 'tool',
+    localId: string,
+    text: string,
+    meta?: Record<string, any>
+  ) {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      const r = await api.addQa({
+        session_id: sid,
+        role: dbRole,
+        text,
+        meta: meta ?? null,
+      });
+      if (r && typeof r.id === 'number') {
+        setQaDbIds((prev) => ({ ...prev, [localId]: r.id }));
+      }
+    } catch (e) {
+      console.error('[App] Failed to persist Q&A:', e);
+    }
+  }
+
+  async function handleNewSession() {
+    const api = window.electronAPI;
+    if (!api) return;
+    const sid = await api.newSession();
+    setSessionId(sid);
+    setConversation([]);
+    setQaDbIds({});
+    console.log(`[App] New session: ${sid}`);
+  }
+
+  async function handleClearSession() {
+    if (!sessionId) return;
+    const ok = window.confirm(
+      'Clear ALL Q&A in the current session?\n\nThis cannot be undone. Past sessions are unaffected.'
+    );
+    if (!ok) return;
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      const r = await api.clearSession(sessionId);
+      setConversation([]);
+      setQaDbIds({});
+      console.log(`[App] Cleared ${r.deleted} entries from session ${sessionId.slice(0, 8)}…`);
+    } catch (e) {
+      console.error('[App] Failed to clear session:', e);
+    }
+  }
+
+  async function handleDeleteQa(localId: string) {
+    const dbId = qaDbIds[localId];
+    if (dbId == null) return;
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      const r = await api.deleteQa(dbId);
+      if (r.ok) {
+        setConversation((prev) => prev.filter((c) => c.id !== localId));
+        setQaDbIds((prev) => {
+          const { [localId]: _drop, ...rest } = prev;
+          return rest;
+        });
+      }
+    } catch (e) {
+      console.error('[App] Failed to delete Q&A:', e);
     }
   }
 
@@ -228,6 +352,15 @@ export default function App() {
     };
     setConversation((prev) => [...prev, questionEntry]);
 
+    // AFD-166: persist the question to SQLite. Best-effort, doesn't block.
+    if (sessionId) {
+      persistQa(sessionId, 'interviewer', questionEntry.id, question, {
+        provider: settings.provider,
+        model: settings.model,
+        event: 'question',
+      });
+    }
+
     const systemPrompt = buildInterviewSystemPrompt();
     const messages = [
       { role: 'system' as const, content: systemPrompt },
@@ -243,6 +376,7 @@ export default function App() {
       setIsMinimized(false);
       setStealthMode(false);
 
+      const startTs = Date.now();
       await streamLLMWithFallback(
         messages,
         getLLMConfig(),
@@ -260,6 +394,18 @@ export default function App() {
             type: 'suggestion',
           };
           setConversation((prev) => [...prev, answerEntry]);
+          // AFD-166: persist the answer with timing metadata. The AI's
+          // answer is what the candidate would paraphrase aloud, so it
+          // maps to the DB's 'me' role (vs 'interviewer' for the question).
+          if (sessionId) {
+            persistQa(sessionId, 'me', answerEntry.id, response.text, {
+              provider: response.provider,
+              model: response.model,
+              tokens_used: response.tokensUsed ?? null,
+              latency_ms: Date.now() - startTs,
+              event: 'answer',
+            });
+          }
           // P0 fix 1.3 — auto-hide DISABLED. The 4s timer I shipped in the
           // first P0 batch was too aggressive: the candidate needs to read
           // the answer, and the overlay vanishing mid-interview was
@@ -490,6 +636,10 @@ RULES:
             fontSize={settings.fontSize}
             audioLevel={audioLevel}
             audioSilentSeconds={audioSilentSeconds}
+            sessionId={sessionId}
+            onNewSession={handleNewSession}
+            onClearSession={handleClearSession}
+            onDeleteQa={handleDeleteQa}
           />
         )}
 

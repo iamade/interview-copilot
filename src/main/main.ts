@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, d
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
+import { initDb, addQa, listQaBySession, listAllQa, listSessions, deleteQa, clearSession, countQaBySession, type QaRole } from './db';
+import { randomUUID } from 'crypto';
 
 // ── Local Whisper server (faster-whisper) ──
 // Transcription runs fully on-device. We spawn the Python server once on
@@ -331,6 +333,93 @@ ipcMain.handle('store:get', (_event, key: string) => store.get(key));
 ipcMain.handle('store:set', (_event, key: string, value: any) => store.set(key, value));
 ipcMain.handle('store:getAll', () => store.store);
 
+// ── Q&A persistence (AFD-166) ──
+// All Q&A events from the renderer hit these IPCs; the underlying store is
+// SQLite (better-sqlite3) in userData/interview-copilot.db. Survives Cmd+R,
+// renderer reload, full app restart. The session_id is generated on first
+// call to qa:ensureSession and persisted in electron-store.
+ipcMain.handle('qa:ensureSession', () => {
+  const existing = store.get('currentSessionId') as string | undefined;
+  if (existing) return existing;
+  const id = randomUUID();
+  store.set('currentSessionId', id);
+  console.log(`[qa] New session created: ${id}`);
+  return id;
+});
+
+ipcMain.handle('qa:newSession', () => {
+  const id = randomUUID();
+  store.set('currentSessionId', id);
+  console.log(`[qa] Session rotated to: ${id}`);
+  return id;
+});
+
+ipcMain.handle('qa:getCurrentSession', () => {
+  return (store.get('currentSessionId') as string | undefined) ?? null;
+});
+
+ipcMain.handle('qa:setCurrentSession', (_event, sessionId: string) => {
+  if (typeof sessionId !== 'string' || !sessionId) {
+    throw new Error('qa:setCurrentSession requires a non-empty sessionId');
+  }
+  store.set('currentSessionId', sessionId);
+  return sessionId;
+});
+
+ipcMain.handle('qa:add', (_event, payload: {
+  session_id: string;
+  role: QaRole;
+  text: string;
+  meta?: Record<string, any> | null;
+}) => {
+  // Whitelist role to keep CHECK constraint strict even if renderer sends garbage
+  const allowedRoles: QaRole[] = ['interviewer', 'me', 'system', 'tool'];
+  if (!allowedRoles.includes(payload.role)) {
+    throw new Error(`qa:add invalid role "${payload.role}"`);
+  }
+  if (!payload.text || typeof payload.text !== 'string') {
+    throw new Error('qa:add requires non-empty text');
+  }
+  const id = addQa({
+    session_id: payload.session_id,
+    role: payload.role,
+    text: payload.text,
+    meta: payload.meta ?? null,
+  });
+  return { id };
+});
+
+ipcMain.handle('qa:listBySession', (_event, sessionId: string) => {
+  if (!sessionId) return [];
+  return listQaBySession(sessionId);
+});
+
+ipcMain.handle('qa:listAll', (_event, limit = 200) => {
+  return listAllQa(limit);
+});
+
+ipcMain.handle('qa:listSessions', (_event, limit = 50) => {
+  return listSessions(limit);
+});
+
+ipcMain.handle('qa:delete', (_event, id: number) => {
+  if (typeof id !== 'number' || !Number.isFinite(id)) {
+    throw new Error('qa:delete requires numeric id');
+  }
+  const ok = deleteQa(id);
+  return { ok };
+});
+
+ipcMain.handle('qa:clearSession', (_event, sessionId: string) => {
+  if (!sessionId) return { deleted: 0 };
+  const deleted = clearSession(sessionId);
+  return { deleted };
+});
+
+ipcMain.handle('qa:countBySession', (_event, sessionId: string) => {
+  return { count: sessionId ? countQaBySession(sessionId) : 0 };
+});
+
 // ── CORS-free fetch proxy ──
 // All LLM API calls go through here to bypass browser CORS restrictions
 ipcMain.handle('fetch:proxy', async (_event, url: string, options: {
@@ -628,6 +717,14 @@ ipcMain.handle('dialog:openFiles', async (_event, options: { title: string; filt
 // ── App lifecycle ──
 
 app.whenReady().then(() => {
+  // ── SQLite (AFD-166) ──
+  // Open the DB before anything else so the renderer's first IPC works.
+  try {
+    initDb();
+  } catch (e) {
+    console.error('[main] Failed to initialize SQLite DB:', e);
+  }
+
   // ── Media permissions: auto-approve microphone & screen capture ──
   // This prevents the "bad IPC message" crash when requesting audio
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {

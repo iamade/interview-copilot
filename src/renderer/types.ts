@@ -84,6 +84,45 @@ declare global {
       // Stream event listeners (return cleanup functions)
       onStreamChunk: (callback: (chunk: string) => void) => () => void;
       onStreamDone: (callback: () => void) => () => void;
+
+      // ── AFD-166: Q&A persistence (SQLite via better-sqlite3 in main) ──
+      // Role is whitelist-enforced both client- and server-side; the DB
+      // schema has `CHECK(role IN ('interviewer','me','system','tool'))`.
+      ensureSession: () => Promise<string>;
+      newSession: () => Promise<string>;
+      getCurrentSession: () => Promise<string | null>;
+      setCurrentSession: (sessionId: string) => Promise<string>;
+      addQa: (payload: {
+        session_id: string;
+        role: 'interviewer' | 'me' | 'system' | 'tool';
+        text: string;
+        meta?: Record<string, any> | null;
+      }) => Promise<{ id: number }>;
+      listQaBySession: (sessionId: string) => Promise<Array<{
+        id: number;
+        session_id: string;
+        ts: number;
+        role: 'interviewer' | 'me' | 'system' | 'tool';
+        text: string;
+        meta: string | null;
+      }>>;
+      listAllQa: (limit?: number) => Promise<Array<{
+        id: number;
+        session_id: string;
+        ts: number;
+        role: 'interviewer' | 'me' | 'system' | 'tool';
+        text: string;
+        meta: string | null;
+      }>>;
+      listSessions: (limit?: number) => Promise<Array<{
+        session_id: string;
+        first_ts: number;
+        last_ts: number;
+        count: number;
+      }>>;
+      deleteQa: (id: number) => Promise<{ ok: boolean }>;
+      clearSession: (sessionId: string) => Promise<{ deleted: number }>;
+      countQaBySession: (sessionId: string) => Promise<{ count: number }>;
     };
   }
 }
