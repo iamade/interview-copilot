@@ -13,10 +13,16 @@ export type LLMProvider =
   | 'openclaw'
   | 'openrouter'
   | 'glm'
+  | 'qwen'              // Aliyun DashScope / Qwen Token Plan (OpenAI-compatible) — key from tobi .env
   | 'custom';
 
 // OpenClaw gateway (OpenAI-compatible) running locally on the Mac.
 export const OPENCLAW_GATEWAY_ENDPOINT = 'http://localhost:18789/v1/chat/completions';
+
+// Qwen (Aliyun DashScope / Token Plan) — OpenAI-compatible chat completions.
+// The Token Plan endpoint is the only one that accepts Ade's sk-sp-... PAYG keys;
+// the regular DashScope endpoint (dashscope-intl.aliyuncs.com) returns 401 for those.
+export const DEFAULT_QWEN_ENDPOINT = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
 
 // MiniMax — OpenAI-compatible chat completions at api.minimax.io/v1.
 // Override with the `minimaxEndpoint` setting if MiniMax ever moves hostnames.
@@ -134,6 +140,21 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
     models: [
       { id: 'glm-5.1', name: 'GLM 5.1' },
       { id: 'glm-4-plus', name: 'GLM 4 Plus' },
+    ],
+  },
+  qwen: {
+    label: 'Qwen (Aliyun DashScope · Token Plan)',
+    // OpenAI-compatible chat completions at the Token Plan endpoint.
+    // Model names use dots (qwen3.8-max, qwen3.7-max) — verified live 2026-08-11 20:50 MDT
+    // against Ade's sk-sp-... PAYG key. Default endpoint set in DEFAULT_QWEN_ENDPOINT
+    // below; key from tobi .env (DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY) or Copilot .env (QWEN_API_KEY).
+    models: [
+      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (frontier · 1M ctx)' },
+      { id: 'qwen3.7-max', name: 'Qwen 3.7 Max' },
+      { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus' },
+      { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash (fast)' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (Token Plan)' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (Token Plan)' },
     ],
   },
   openclaw: {
@@ -440,6 +461,52 @@ async function callGLM(messages: Message[], config: LLMConfig): Promise<LLMRespo
   };
 }
 
+// ── Qwen (Aliyun DashScope / Token Plan, OpenAI-compatible) ──
+// Ade's sk-sp-... PAYG key only works against the Token Plan endpoint
+// (token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1).
+// The regular DashScope endpoint (dashscope-intl.aliyuncs.com) returns 401
+// for those keys — the baseUrl fix per Tobi 00:47 MDT Aug 11 is the only path.
+async function callQwen(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_QWEN_ENDPOINT;
+
+  if (!config.apiKey) {
+    throw new Error('Qwen: API key is required (set QWEN_API_KEY in .env, or it auto-loads from DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY in ~/.openclaw/.env)');
+  }
+
+  const data = await corsFetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content:
+          typeof m.content === 'string'
+            ? m.content
+            : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+      stream: false,
+    }),
+  });
+
+  if (data.error) {
+    const msg = data.error?.message || data.error || JSON.stringify(data.error);
+    throw new Error(`Qwen: ${typeof msg === 'string' ? msg : JSON.stringify(msg)}`);
+  }
+
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    provider: 'qwen',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
 // ── MiniMax (direct, OpenAI-compatible) ──
 // Hits api.minimax.io/v1/chat/completions. MiniMax models (M3, M2.7, M2.x) include
 // <think>…</think> blocks in the response by default — strip them so the
@@ -657,6 +724,8 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
       return callOllama(messages, config);
     case 'glm':
       return callGLM(messages, config);
+    case 'qwen':
+      return callQwen(messages, config);
     case 'openclaw':
       return callOpenClaw(messages, config);
     case 'openrouter':
@@ -808,14 +877,20 @@ export interface FallbackStep {
   model: string;
   /** Provider key in apiKeys whose presence enables this fallback. Use
    *  'ollama' which is free and doesn't need a real key. */
-  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'none';
-  /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. */
+  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'qwen' | 'glm' | 'none';
+  /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. For 'qwen' defaults to Aliyun Token Plan. */
   endpoint?: string;
 }
 
 export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
+  // Order matters — first success wins. The chain now has 5 fallbacks (was 2).
+  // Updated 2026-08-11 20:50 MDT per Ade directive: deeper fallthrough so a
+  // primary failure doesn't strand the user with "all N fallbacks also failed".
   { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
   { provider: 'ollama', model: 'deepseek-v4-pro', needsKey: 'none', endpoint: 'https://api.ollama.com' },
+  { provider: 'qwen', model: 'qwen3.8-max', needsKey: 'qwen' },
+  { provider: 'glm', model: 'glm-5.1', needsKey: 'glm' },
+  { provider: 'openai', model: 'gpt-4o-mini', needsKey: 'openai' },
 ];
 
 /**

@@ -173,26 +173,35 @@ const store = new Store({
 
 // ── Load API keys from .env file ──
 // Seeds electron-store with keys from .env so the renderer can access them.
+// Also reads ~/.openclaw/.env as a secondary source — Tobi's env has the QWEN key
+// (DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY) + QWEN_OpenAI_Compatible_URL that the Copilot
+// needs for the Token Plan endpoint. Per Ade 20:50 MDT Aug 11 directive.
 function loadEnvKeys() {
   const envPath = path.join(__dirname, '../../.env');
-  if (!fs.existsSync(envPath)) return;
+  const tobiEnvPath = '/Users/adesegunkoiki/.openclaw/.env';
 
-  const envContent = fs.readFileSync(envPath, 'utf-8');
-  const envVars: Record<string, string> = {};
-
-  for (const line of envContent.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith('#')) continue;
-    const eqIdx = trimmed.indexOf('=');
-    if (eqIdx === -1) continue;
-    const key = trimmed.slice(0, eqIdx).trim();
-    let val = trimmed.slice(eqIdx + 1).trim();
-    // Strip surrounding quotes
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1);
+  const readEnvFile = (filePath: string): Record<string, string> => {
+    if (!fs.existsSync(filePath)) return {};
+    const envContent = fs.readFileSync(filePath, 'utf-8');
+    const vars: Record<string, string> = {};
+    for (const line of envContent.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) continue;
+      const eqIdx = trimmed.indexOf('=');
+      if (eqIdx === -1) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      let val = trimmed.slice(eqIdx + 1).trim();
+      // Strip surrounding quotes (Tobi's .env has quoted values; some may have nested escapes)
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      vars[key] = val;
     }
-    envVars[key] = val;
-  }
+    return vars;
+  };
+
+  // Copilot .env takes precedence; Tobi .env is the secondary source
+  const envVars = { ...readEnvFile(tobiEnvPath), ...readEnvFile(envPath) };
 
   // Map env vars → electron-store apiKeys
   const currentKeys: Record<string, string> = store.get('apiKeys') || {};
@@ -205,6 +214,10 @@ function loadEnvKeys() {
     OLLAMA_API_KEY: 'ollama',
     OPENCLAW_API_KEY: 'openclaw',
     OPENROUTER_API_KEY: 'openrouter',
+    // Qwen — prefer the clean QWEN_API_KEY (Copilot .env) but fall back to
+    // DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY (Tobi's .env) per Ade 20:50 MDT Aug 11.
+    QWEN_API_KEY: 'qwen',
+    DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY: 'qwen',
   };
 
   let updated = false;
@@ -236,6 +249,13 @@ function loadEnvKeys() {
   }
   if (envVars['MINIMAX_ENDPOINT'] && !currentEndpoints['minimax']) {
     currentEndpoints['minimax'] = envVars['MINIMAX_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Qwen endpoint — prefer QWEN_OPENAI_COMPATIBLE_URL (Copilot .env) but
+  // fall back to QWEN_OpenAI_Compatible_URL (Tobi's .env, capital URL).
+  const qwenEndpoint = envVars['QWEN_OPENAI_COMPATIBLE_URL'] || envVars['QWEN_OpenAI_Compatible_URL'];
+  if (qwenEndpoint && !currentEndpoints['qwen']) {
+    currentEndpoints['qwen'] = qwenEndpoint;
     store.set('customEndpoints', currentEndpoints);
   }
 }
