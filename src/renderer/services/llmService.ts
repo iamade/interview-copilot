@@ -974,7 +974,352 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
 }
 
 // ── Streaming support ──
-// Uses IPC streaming for Anthropic, falls back to non-streaming for other providers
+// Per Ade 21:27 MDT Aug 11: latency P0 — extend streaming to ALL OpenAI-
+// compatible providers, not just Anthropic. Without this, every non-
+// Anthropic call (qwen, MiniMax, Ollama, ZAI, Kimi, Gemini-compatible,
+// OpenAI, OpenRouter, PiAPI, etc.) blocked the UI for 1-3 minutes waiting
+// on a single JSON response. With streaming, the user sees the first
+// token in <1s and the answer fills in word-by-word, just like the Anthropic
+// path. Same `fetch:stream` IPC handles all SSE — the only change is the
+// parse loop and the per-provider endpoint/header map.
+//
+// The fallback chain (`streamLLMWithFallback`) now tries each step with
+// streaming. If the primary errors (auth, 429, model-not-found), we move
+// to the next step WITHOUT abandoning the partial stream — the user
+// still gets a streamed answer, just from a different provider. Last
+// resort is non-streaming `callLLMWithFallback` so the user is never
+// left without an answer.
+
+// Provider → OpenAI-compatible SSE capability
+function isOpenAICompatibleProvider(p: LLMProvider): boolean {
+  return [
+    'qwen', 'minimax', 'ollama', 'ollama2', 'zai', 'kimi-code', 'piapi',
+    'openai', 'openrouter', 'openclaw', 'gateway_ollama', 'featherless',
+    'glm', 'dashscope', 'custom',
+  ].includes(p);
+}
+
+// Provider → (url, headers) for OpenAI-compatible /chat/completions
+function buildOpenAIEndpoint(config: LLMConfig): { url: string; headers: Record<string, string> } {
+  const url = (ep: string) => ep.replace(/\/$/, '') + '/chat/completions';
+  const json = (extra: Record<string, string> = {}): Record<string, string> => ({
+    'Content-Type': 'application/json',
+    ...(config.apiKey ? { Authorization: `Bearer ${config.apiKey}` } : {}),
+    ...extra,
+  });
+
+  switch (config.provider) {
+    case 'qwen':
+      return { url: url(config.endpoint || DEFAULT_QWEN_ENDPOINT), headers: json() };
+    case 'minimax':
+      return { url: url(config.endpoint || MINIMAX_API_ENDPOINT), headers: json() };
+    case 'ollama':
+    case 'ollama2':
+      // Use the OpenAI-compatible /v1/chat/completions at ollama.com (DEFAULT_OLLAMA_ENDPOINT).
+      // The native /api/chat path is non-streaming only — for streaming we need the OAI shape.
+      return { url: url(config.endpoint || DEFAULT_OLLAMA_ENDPOINT), headers: json() };
+    case 'zai':
+      return { url: url(config.endpoint || DEFAULT_ZAI_ENDPOINT), headers: json() };
+    case 'kimi-code':
+      return { url: url(config.endpoint || DEFAULT_KIMI_ENDPOINT), headers: json() };
+    case 'piapi':
+      return { url: url(config.endpoint || DEFAULT_PIAPI_ENDPOINT), headers: json() };
+    case 'openai':
+      return { url: 'https://api.openai.com/v1/chat/completions', headers: json() };
+    case 'openrouter':
+      return {
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: json({ 'HTTP-Referer': 'https://interview-copilot.app', 'X-Title': 'Interview Copilot' }),
+      };
+    case 'openclaw':
+      return {
+        url: 'https://openrouter.ai/api/v1/chat/completions',
+        headers: json({ 'HTTP-Referer': 'https://interview-copilot.app', 'X-Title': 'Interview Copilot' }),
+      };
+    case 'gateway_ollama':
+    case 'featherless':
+      return { url: (config.endpoint || OPENCLAW_GATEWAY_ENDPOINT).replace(/\/$/, ''), headers: json() };
+    case 'glm':
+      return { url: url(config.endpoint || 'https://open.bigmodel.cn/api/paas/v4'), headers: json() };
+    case 'dashscope':
+      return { url: url(config.endpoint || DEFAULT_DASHSCOPE_ENDPOINT), headers: json() };
+    case 'custom':
+      if (!config.endpoint) throw new Error('Custom provider: endpoint is required');
+      return { url: config.endpoint.replace(/\/$/, ''), headers: json() };
+    default:
+      throw new Error(`No OpenAI-compatible endpoint mapping for provider: ${config.provider}`);
+  }
+}
+
+// OpenAI-compatible SSE stream parse loop. Each `data: {...}` line carries
+// `choices[0].delta.content` (not `message.content` — that key is non-streaming).
+// Last meaningful line is `data: [DONE]`. We ignore anything that doesn't
+// parse (keep-alive pings, comments, etc.) so a misbehaving provider can't
+// crash the stream.
+//
+// MiniMax-specific: M3 reasoning models emit <think>…</think> blocks as
+// part of the streamed content. We strip them IN-FLIGHT so the user never
+// sees the chain-of-thought. The stripping is stateful across chunk
+// boundaries (`<think>` may open in one chunk and `</think>` in the next).
+async function streamOpenAICompatible(
+  messages: Message[],
+  config: LLMConfig,
+  onChunk: (text: string) => void
+): Promise<{ fullText: string }> {
+  const api = (window as any).electronAPI;
+  if (!api?.fetchStream) throw new Error('Streaming IPC unavailable (electronAPI.fetchStream missing)');
+
+  const openaiMessages = messages.map((m) => ({
+    role: m.role,
+    content:
+      typeof m.content === 'string'
+        ? m.content
+        : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+  }));
+
+  const stripThink = (s: string) =>
+    s
+      .replace(/<think>[\s\S]*?<\/think>/gi, '')
+      .replace(/<\/?think>/gi, '');
+
+  let fullText = '';
+  let insideThink = false; // MiniMax M3 stateful <think>…</think> tracking
+  let firstTokenAt: number | null = null;
+  const startedAt = Date.now();
+
+  // Strip <think>…</think> blocks across chunk boundaries.
+  // Returns the visible text and updates `insideThink` state.
+  const filterThink = (raw: string): string => {
+    if (config.provider !== 'minimax') return raw;
+
+    let visible = '';
+    let i = 0;
+    while (i < raw.length) {
+      if (insideThink) {
+        const close = raw.indexOf('</think>', i);
+        if (close === -1) {
+          // Still inside think; consume rest of chunk
+          i = raw.length;
+        } else {
+          insideThink = false;
+          i = close + '</think>'.length;
+        }
+      } else {
+        const open = raw.indexOf('<think>', i);
+        if (open === -1) {
+          visible += raw.slice(i);
+          i = raw.length;
+        } else {
+          visible += raw.slice(i, open);
+          const close = raw.indexOf('</think>', open);
+          if (close === -1) {
+            insideThink = true;
+            i = raw.length;
+          } else {
+            i = close + '</think>'.length;
+          }
+        }
+      }
+    }
+    return visible;
+  };
+
+  const removeChunkListener = api.onStreamChunk((chunk: string) => {
+    const lines = chunk.split('\n');
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith('data:')) continue;
+      const payload = trimmed.slice(5).trim();
+      if (!payload || payload === '[DONE]') continue;
+      try {
+        const data = JSON.parse(payload);
+        // OpenAI shape: choices[0].delta.content
+        // Some providers (Ollama OAI-compat) use message.content on a non-delta chunk
+        const delta =
+          data.choices?.[0]?.delta?.content ??
+          data.choices?.[0]?.message?.content ??
+          '';
+        if (delta) {
+          if (firstTokenAt === null) firstTokenAt = Date.now();
+          const visible = filterThink(String(delta));
+          if (visible) {
+            fullText += visible;
+            onChunk(visible);
+          }
+        }
+      } catch {
+        // Ignore parse errors (keep-alive, comments, etc.)
+      }
+    }
+  });
+
+  const donePromise = new Promise<void>((resolve) => {
+    const removeDoneListener = api.onStreamDone(() => {
+      removeDoneListener();
+      resolve();
+    });
+  });
+
+  const { url, headers } = buildOpenAIEndpoint(config);
+  const result = await api.fetchStream(url, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      model: config.model,
+      messages: openaiMessages,
+      max_tokens: config.maxTokens || 4096,
+      // Anthropic/Claude rejects temperature on Opus 4.7+ / Sonnet 5; OpenAI-compatible
+      // providers vary. Default to 0.3 unless the caller set something else.
+      ...(config.provider !== 'anthropic' ? { temperature: config.temperature ?? 0.3 } : {}),
+      stream: true,
+    }),
+  });
+
+  if (!result.ok) {
+    removeChunkListener();
+    const errMsg = result.data?.error?.message || (typeof result.data === 'string' ? result.data : null) || `HTTP ${result.status}`;
+    throw new Error(`Stream (${config.provider}/${config.model}): ${errMsg}`);
+  }
+
+  await donePromise;
+  removeChunkListener();
+
+  const totalMs = Date.now() - startedAt;
+  const ttftMs = firstTokenAt ? firstTokenAt - startedAt : null;
+  console.log(
+    `[LLM] ${config.provider}/${config.model} streamed in ${totalMs}ms ` +
+    `(TTFT ${ttftMs !== null ? ttftMs + 'ms' : 'n/a'}, ${fullText.length} chars)`
+  );
+
+  return { fullText: fullText.trim() };
+}
+
+// Anthropic SSE stream parse loop. Extracted from the original
+// `streamLLM` so the dispatch logic is clean.
+async function streamAnthropic(
+  messages: Message[],
+  config: LLMConfig,
+  onChunk: (text: string) => void
+): Promise<{ fullText: string }> {
+  const api = (window as any).electronAPI;
+  if (!api?.fetchStream) throw new Error('Streaming IPC unavailable (electronAPI.fetchStream missing)');
+
+  const systemMsg = messages.find((m) => m.role === 'system');
+  const conversationMsgs = messages.filter((m) => m.role !== 'system');
+
+  // Sanitize: drop empty content parts/blocks (issue 1.1 — Anthropic 400s otherwise)
+  const anthropicMessages = conversationMsgs
+    .map((m) => {
+      if (typeof m.content === 'string') {
+        const t = m.content.trim();
+        return t ? { role: m.role, content: t } : null;
+      }
+      const parts = (m.content as ContentPart[])
+        .map((part) => {
+          if (part.type === 'text') {
+            const t = (part.text || '').trim();
+            return t ? { type: 'text' as const, text: t } : null;
+          }
+          if (part.type === 'image_url') {
+            const dataUrl = part.image_url!.url;
+            const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
+            if (base64Match) {
+              return {
+                type: 'image' as const,
+                source: {
+                  type: 'base64' as const,
+                  media_type: `image/${base64Match[1]}` as any,
+                  data: base64Match[2],
+                },
+              };
+            }
+            return null;
+          }
+          return null;
+        })
+        .filter((p): p is NonNullable<typeof p> => p !== null);
+      return { role: m.role, content: parts };
+    })
+    .filter((m): m is NonNullable<typeof m> => m !== null)
+    .filter((m) => {
+      if (typeof m.content === 'string') return m.content.trim().length > 0;
+      return (m.content as any[]).length > 0;
+    });
+
+  if (anthropicMessages.length === 0) {
+    throw new Error('Anthropic: all user messages were empty after sanitization');
+  }
+
+  let fullText = '';
+  let firstTokenAt: number | null = null;
+  const startedAt = Date.now();
+
+  const removeChunkListener = api.onStreamChunk((chunk: string) => {
+    const lines = chunk.split('\n');
+    for (const line of lines) {
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (data.type === 'content_block_delta' && data.delta?.text) {
+            if (firstTokenAt === null) firstTokenAt = Date.now();
+            fullText += data.delta.text;
+            onChunk(data.delta.text);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      }
+    }
+  });
+
+  const donePromise = new Promise<void>((resolve) => {
+    const removeDoneListener = api.onStreamDone(() => {
+      removeDoneListener();
+      resolve();
+    });
+  });
+
+  const result = await api.fetchStream('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.apiKey!,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: config.model,
+      max_tokens: config.maxTokens || 4096,
+      // `temperature` is deprecated on Opus 4.7+ / 4.8 / Sonnet 5 — omit it.
+      system: systemMsg?.content || '',
+      messages: anthropicMessages,
+      stream: true,
+    }),
+  });
+
+  if (!result.ok) {
+    removeChunkListener();
+    const errMsg = result.data?.error?.message || `HTTP ${result.status}`;
+    throw new Error(`Anthropic Stream: ${errMsg}`);
+  }
+
+  await donePromise;
+  removeChunkListener();
+
+  const totalMs = Date.now() - startedAt;
+  const ttftMs = firstTokenAt ? firstTokenAt - startedAt : null;
+  console.log(
+    `[LLM] anthropic/${config.model} streamed in ${totalMs}ms ` +
+    `(TTFT ${ttftMs !== null ? ttftMs + 'ms' : 'n/a'}, ${fullText.length} chars)`
+  );
+
+  return { fullText };
+}
+
+// ── Public streaming entry point ──
+// Tries to stream the request. Throws on failure so the caller (the
+// fallback chain) can try the next provider. Falls back to non-streaming
+// ONLY if the streaming IPC itself is unavailable — in that case there's
+// no point in the chain trying to stream either.
 export async function streamLLM(
   messages: Message[],
   config: LLMConfig,
@@ -983,116 +1328,30 @@ export async function streamLLM(
 ): Promise<void> {
   const api = (window as any).electronAPI;
 
-  if (config.provider === 'anthropic' && api?.fetchStream) {
-    // Stream through Electron main process IPC
-    const systemMsg = messages.find((m) => m.role === 'system');
-    const conversationMsgs = messages.filter((m) => m.role !== 'system');
-
-    // Sanitize: drop empty content parts/blocks (issue 1.1 — Anthropic 400s otherwise)
-    const anthropicMessages = conversationMsgs
-      .map((m) => {
-        if (typeof m.content === 'string') {
-          const t = m.content.trim();
-          return t ? { role: m.role, content: t } : null;
-        }
-        const parts = (m.content as ContentPart[])
-          .map((part) => {
-            if (part.type === 'text') {
-              const t = (part.text || '').trim();
-              return t ? { type: 'text' as const, text: t } : null;
-            }
-            if (part.type === 'image_url') {
-              const dataUrl = part.image_url!.url;
-              const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
-              if (base64Match) {
-                return {
-                  type: 'image' as const,
-                  source: {
-                    type: 'base64' as const,
-                    media_type: `image/${base64Match[1]}` as any,
-                    data: base64Match[2],
-                  },
-                };
-              }
-              return null;
-            }
-            return null;
-          })
-          .filter((p): p is NonNullable<typeof p> => p !== null);
-        return { role: m.role, content: parts };
-      })
-      .filter((m): m is NonNullable<typeof m> => m !== null)
-      .filter((m) => {
-        if (typeof m.content === 'string') return m.content.trim().length > 0;
-        return (m.content as any[]).length > 0;
-      });
-
-    if (anthropicMessages.length === 0) {
-      throw new Error('Anthropic: all user messages were empty after sanitization');
-    }
-
-    let fullText = '';
-
-    // Set up stream listeners
-    const removeChunkListener = api.onStreamChunk((chunk: string) => {
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(line.slice(6));
-            if (data.type === 'content_block_delta' && data.delta?.text) {
-              fullText += data.delta.text;
-              onChunk(data.delta.text);
-            }
-          } catch {}
-        }
-      }
-    });
-
-    const donePromise = new Promise<void>((resolve) => {
-      const removeDoneListener = api.onStreamDone(() => {
-        removeDoneListener();
-        resolve();
-      });
-    });
-
-    const result = await api.fetchStream('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': config.apiKey!,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: config.model,
-        max_tokens: config.maxTokens || 4096,
-        // `temperature` is deprecated on Opus 4.7+ / 4.8 / Sonnet 5 — omit it.
-        system: systemMsg?.content || '',
-        messages: anthropicMessages,
-        stream: true,
-      }),
-    });
-
-    if (!result.ok) {
-      removeChunkListener();
-      const errMsg = result.data?.error?.message || `HTTP ${result.status}`;
-      throw new Error(`Anthropic Stream: ${errMsg}`);
-    }
-
-    await donePromise;
-    removeChunkListener();
-
-    onDone({
-      text: fullText,
-      provider: 'anthropic',
-      model: config.model,
-    });
-  } else {
-    // Non-streaming fallback — works for all providers
+  if (!api?.fetchStream) {
+    // IPC streaming not exposed — fall back to a single-shot non-streaming call.
     const result = await callLLM(messages, config);
     onChunk(result.text);
     onDone(result);
+    return;
   }
+
+  if (config.provider === 'anthropic') {
+    const { fullText } = await streamAnthropic(messages, config, onChunk);
+    onDone({ text: fullText, provider: 'anthropic', model: config.model });
+    return;
+  }
+
+  if (isOpenAICompatibleProvider(config.provider)) {
+    const { fullText } = await streamOpenAICompatible(messages, config, onChunk);
+    onDone({ text: fullText, provider: config.provider, model: config.model });
+    return;
+  }
+
+  // Non-streaming-capable providers (e.g. Gemini native API) — single shot.
+  const result = await callLLM(messages, config);
+  onChunk(result.text);
+  onDone(result);
 }
 
 // ── Fallback model chain (P0 fix 1.6) ──
@@ -1212,10 +1471,14 @@ export async function callLLMWithFallback(
 }
 
 /**
- * Streaming LLM with fallback. Tries to stream the primary (only Anthropic
- * is streamable via IPC today). If the stream errors out OR the primary is
- * non-Anthropic, falls back to non-streaming callLLMWithFallback so the user
- * still gets an answer — just delivered in one chunk.
+ * Streaming LLM with fallback. Tries to STREAM the primary first. If the
+ * stream errors out (auth, rate limit, model not found, network blip),
+ * walks the fallback chain — each step also attempts to stream, so the
+ * user still gets a token-by-token answer from the next viable model.
+ *
+ * Last resort is non-streaming `callLLMWithFallback` so the user is never
+ * left without an answer. The user sees the first token in <1s for any
+ * provider that supports streaming.
  */
 export async function streamLLMWithFallback(
   messages: Message[],
@@ -1226,21 +1489,63 @@ export async function streamLLMWithFallback(
   onChunk: (text: string) => void,
   onDone: (full: LLMResponse) => void
 ): Promise<void> {
-  const api = (window as any).electronAPI;
+  // 1. Try streaming the primary config
+  try {
+    await streamLLM(messages, primaryConfig, onChunk, onDone);
+    return;
+  } catch (primaryErr: any) {
+    const primaryMsg = primaryErr?.message || String(primaryErr);
+    console.warn(
+      `[LLM] Primary ${primaryConfig.provider}/${primaryConfig.model} stream failed: ${primaryMsg}. ` +
+      `Walking fallback chain (${fallbackChain.length} steps).`
+    );
+  }
 
-  // Only Anthropic is streamable; everything else is non-streaming.
-  if (primaryConfig.provider === 'anthropic' && api?.fetchStream) {
+  // 2. Walk the fallback chain with streaming. Each step is best-effort;
+  // a single bad step (e.g. 401 on a stale key) should not abort the
+  // whole chain — move on to the next viable provider.
+  for (const step of fallbackChain) {
+    // Don't re-attempt the same provider/model as the primary
+    if (step.provider === primaryConfig.provider && step.model === primaryConfig.model) {
+      continue;
+    }
+
+    // Skip if a required key is missing
+    if (step.needsKey !== 'none') {
+      const key = apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '');
+      if (!key) {
+        console.log(`[LLM] Skipping fallback ${step.provider}/${step.model} — no API key for ${step.needsKey}`);
+        continue;
+      }
+    }
+
+    const fallbackConfig: LLMConfig = {
+      provider: step.provider,
+      model: step.model,
+      apiKey: step.needsKey === 'none' ? '' : (apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '')),
+      endpoint: step.endpoint || customEndpoints[step.provider] || undefined,
+      temperature: primaryConfig.temperature,
+      maxTokens: primaryConfig.maxTokens,
+    };
+
     try {
-      await streamLLM(messages, primaryConfig, onChunk, onDone);
+      await streamLLM(messages, fallbackConfig, onChunk, onDone);
+      console.log(`[LLM] Fallback succeeded (streamed): ${step.provider}/${step.model}`);
       return;
-    } catch (streamError: any) {
-      const msg = streamError?.message || String(streamError);
-      console.warn(`[LLM] Anthropic stream failed: ${msg}. Falling back to non-streaming chain.`);
-      // Fall through to non-streaming path
+    } catch (err: any) {
+      const msg = err?.message || String(err);
+      console.warn(`[LLM] Fallback ${step.provider}/${step.model} stream failed: ${msg}`);
     }
   }
 
-  // Non-streaming path: primary + fallback chain.
+  // 3. All streaming attempts failed. Last resort: non-streaming
+  // callLLMWithFallback so the user is never left without an answer.
+  // This blocks the UI for the duration of the slowest call, but it's
+  // strictly better than throwing.
+  console.warn(
+    `[LLM] All ${fallbackChain.length} streaming fallbacks failed. ` +
+    `Falling back to non-streaming callLLMWithFallback as last resort.`
+  );
   const result = await callLLMWithFallback(messages, primaryConfig, apiKeys, customEndpoints, fallbackChain);
   onChunk(result.text);
   onDone(result);
