@@ -3,17 +3,22 @@
 // The main process makes the actual HTTP requests from Node.js (no CORS restrictions).
 
 export type LLMProvider =
-  | 'gateway_ollama'    // NEW default — routes through OpenClaw gateway → ollama/deepseek-v4-pro:cloud
-  | 'featherless'       // NEW alternative — routes through OpenClaw gateway → featherless tier
+  | 'gateway_ollama'    // routes through OpenClaw gateway → ollama/deepseek-v4-pro:cloud
+  | 'featherless'       // routes through OpenClaw gateway → featherless tier
   | 'anthropic'         // Claude (api.anthropic.com)
   | 'minimax'           // MiniMax (api.minimax.io) — direct, OpenAI-compatible
-  | 'openai'
-  | 'gemini'
-  | 'ollama'
-  | 'openclaw'
-  | 'openrouter'
-  | 'glm'
-  | 'qwen'              // Aliyun DashScope / Qwen Token Plan (OpenAI-compatible) — key from tobi .env
+  | 'openai'            // OpenAI (api.openai.com) — OpenAI-compatible
+  | 'gemini'            // Google Gemini (generativelanguage.googleapis.com) — native API
+  | 'ollama'            // Ollama Cloud (ollama.com) — OpenAI-compatible
+  | 'ollama2'           // Ollama Cloud alt key (ollama.com) — OpenAI-compatible
+  | 'openclaw'          // OpenClaw (via OpenRouter)
+  | 'openrouter'        // OpenRouter direct
+  | 'glm'               // GLM via Zhipu (open.bigmodel.cn) — OpenAI-compatible
+  | 'zai'               // GLM via Z.AI (api.z.ai) — OpenAI-compatible
+  | 'kimi-code'         // Kimi direct (api.kimi.com) — OpenAI-compatible
+  | 'piapi'             // PiAPI (api.piapi.ai) — OpenAI-compatible
+  | 'qwen'              // Aliyun DashScope / Qwen Token Plan (OpenAI-compatible)
+  | 'dashscope'         // Aliyun regular DashScope (BROKEN for sk-sp-... keys) — kept for completeness
   | 'custom';
 
 // OpenClaw gateway (OpenAI-compatible) running locally on the Mac.
@@ -24,9 +29,27 @@ export const OPENCLAW_GATEWAY_ENDPOINT = 'http://localhost:18789/v1/chat/complet
 // the regular DashScope endpoint (dashscope-intl.aliyuncs.com) returns 401 for those.
 export const DEFAULT_QWEN_ENDPOINT = 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
 
+// DashScope (regular Aliyun, OpenAI-compatible) — for non-PAYG keys. Returns 401 for sk-sp-... keys.
+export const DEFAULT_DASHSCOPE_ENDPOINT = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+
 // MiniMax — OpenAI-compatible chat completions at api.minimax.io/v1.
 // Override with the `minimaxEndpoint` setting if MiniMax ever moves hostnames.
 export const MINIMAX_API_ENDPOINT = 'https://api.minimax.io/v1/chat/completions';
+
+// Ollama Cloud (OpenAI-compatible)
+export const DEFAULT_OLLAMA_ENDPOINT = 'https://ollama.com/v1';
+
+// Google Gemini (native API, not OpenAI-compatible)
+export const DEFAULT_GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta';
+
+// GLM via Z.AI (OpenAI-compatible, ZAI's coding endpoint)
+export const DEFAULT_ZAI_ENDPOINT = 'https://api.z.ai/api/coding/paas/v4';
+
+// Kimi Code (OpenAI-compatible)
+export const DEFAULT_KIMI_ENDPOINT = 'https://api.kimi.com/coding/v1';
+
+// PiAPI (OpenAI-compatible)
+export const DEFAULT_PIAPI_ENDPOINT = 'https://api.piapi.ai/v1';
 
 export interface LLMConfig {
   provider: LLMProvider;
@@ -117,26 +140,86 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
   },
   gemini: {
     label: 'Google Gemini',
+    // Verified live against Tobi's GOOGLE_API_KEY (2026-08-11 21:00 MDT).
+    // All 5 models from Tobi's google provider in ~/.openclaw/openclaw.json.
     models: [
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
+      { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
+      { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite' },
+      { id: 'gemini-3.1-flash-image-preview', name: 'Nano Banana 2 (Flash Image)' },
+      { id: 'gemini-3-pro-image-preview', name: 'Nano Banana Pro' },
     ],
   },
   ollama: {
-    label: 'Ollama Cloud (free · deepseek-v4-pro)',
-    // Verified live on api.ollama.com with the key seeded from .env.
+    label: 'Ollama Cloud (free · OLLAMA_API_KEY from tobi .env)',
+    // 11 models from Tobi's ollama provider — all free, OpenAI-compatible at https://ollama.com/v1.
+    // Default endpoint in DEFAULT_OLLAMA_ENDPOINT below.
     models: [
-      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (default)' },
-      { id: 'glm-5.1', name: 'GLM 5.1' },
-      { id: 'glm-5', name: 'GLM 5' },
-      { id: 'gpt-oss:120b', name: 'GPT-OSS 120B' },
-      { id: 'qwen3.5:397b', name: 'Qwen 3.5 397B' },
-      { id: 'kimi-k2.6', name: 'Kimi K2.6' },
-      { id: 'deepseek-v3.2', name: 'DeepSeek V3.2' },
+      { id: 'qwen2.5vl:7b', name: 'Qwen 2.5 VL 7B' },
+      { id: 'qwen3-vl:235b-cloud', name: 'Qwen3 VL 235B Cloud' },
+      { id: 'glm-5.1:cloud', name: 'GLM 5.1 Cloud' },
+      { id: 'glm-5.2:cloud', name: 'GLM 5.2 Cloud' },
+      { id: 'deepseek-v4-pro:cloud', name: 'DeepSeek V4 Pro Cloud (1M ctx)' },
+      { id: 'qwen3.5:397b-cloud', name: 'Qwen 3.5 397B Cloud' },
+      { id: 'kimi-k2.6:cloud', name: 'Kimi K2.6 Cloud' },
+      { id: 'kimi-k2.7-code:cloud', name: 'Kimi K2.7 Code Cloud' },
+      { id: 'kimi-k3:cloud', name: 'Kimi K3 Cloud' },
+      { id: 'nemotron-3-ultra:cloud', name: 'Nemotron 3 Ultra Cloud' },
+      { id: 'minimax-m3:cloud', name: 'MiniMax M3 Cloud' },
+    ],
+  },
+  ollama2: {
+    label: 'Ollama Cloud (alt key · OLLAMA_OPENCLAW_AGENTS_API_KEY_2)',
+    // Same 11 models as ollama, but using the second key from Tobi's .env.
+    // Useful for parallel requests, key rotation, or splitting quota.
+    models: [
+      { id: 'qwen2.5vl:7b', name: 'Qwen 2.5 VL 7B' },
+      { id: 'qwen3-vl:235b-cloud', name: 'Qwen3 VL 235B Cloud' },
+      { id: 'glm-5.1:cloud', name: 'GLM 5.1 Cloud' },
+      { id: 'glm-5.2:cloud', name: 'GLM 5.2 Cloud' },
+      { id: 'deepseek-v4-pro:cloud', name: 'DeepSeek V4 Pro Cloud (1M ctx)' },
+      { id: 'qwen3.5:397b-cloud', name: 'Qwen 3.5 397B Cloud' },
+      { id: 'kimi-k2.6:cloud', name: 'Kimi K2.6 Cloud' },
+      { id: 'kimi-k2.7-code:cloud', name: 'Kimi K2.7 Code Cloud' },
+      { id: 'kimi-k3:cloud', name: 'Kimi K3 Cloud' },
+      { id: 'nemotron-3-ultra:cloud', name: 'Nemotron 3 Ultra Cloud' },
+      { id: 'minimax-m3:cloud', name: 'MiniMax M3 Cloud' },
+    ],
+  },
+  zai: {
+    label: 'Z.AI (GLM coding endpoint · ZAI_API_KEY)',
+    // 4 models from Tobi's zai provider — OpenAI-compatible at https://api.z.ai/api/coding/paas/v4.
+    // Default endpoint in DEFAULT_ZAI_ENDPOINT below.
+    models: [
+      { id: 'glm-5.2', name: 'GLM 5.2 (ZAI)' },
+      { id: 'glm-5.1', name: 'GLM 5.1 (ZAI)' },
+      { id: 'glm-5v-turbo', name: 'GLM 5V Turbo (vision · ZAI)' },
+      { id: 'glm-4.6v-flash', name: 'GLM 4.6V Flash (vision · ZAI)' },
+    ],
+  },
+  'kimi-code': {
+    label: 'Kimi Code direct (KIMI_API_KEY_MAC_OPENCLAW)',
+    // 2 models from Tobi's kimi-code provider — OpenAI-compatible at https://api.kimi.com/coding/v1.
+    // Default endpoint in DEFAULT_KIMI_ENDPOINT below.
+    models: [
+      { id: 'k3', name: 'Kimi K3 (Allegretto · 1M ctx)' },
+      { id: 'kimi-for-coding-highspeed', name: 'Kimi Code HighSpeed' },
+    ],
+  },
+  piapi: {
+    label: 'PiAPI (PIAPI_KEY_FOR_TOBI)',
+    // 5 models from Tobi's piapi provider — OpenAI-compatible at https://api.piapi.ai/v1.
+    // PAYG; has per-model cost ($2.25-$18.75/M). Default endpoint in DEFAULT_PIAPI_ENDPOINT.
+    models: [
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (PiAPI · $2.25/$11.25)' },
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 (PiAPI · $3.75/$18.75)' },
+      { id: 'gpt-5.2', name: 'GPT 5.2 (PiAPI)' },
+      { id: 'gpt-4.1', name: 'GPT 4.1 (PiAPI)' },
+      { id: 'gpt-4o-mini', name: 'GPT 4o Mini (PiAPI)' },
     ],
   },
   glm: {
-    label: 'GLM (Zhipu AI)',
+    label: 'GLM (Zhipu AI · direct)',
     models: [
       { id: 'glm-5.1', name: 'GLM 5.1' },
       { id: 'glm-4-plus', name: 'GLM 4 Plus' },
@@ -144,17 +227,29 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
   },
   qwen: {
     label: 'Qwen (Aliyun DashScope · Token Plan)',
-    // OpenAI-compatible chat completions at the Token Plan endpoint.
+    // 10 models from Tobi's qwen provider — OpenAI-compatible at the Token Plan endpoint.
     // Model names use dots (qwen3.8-max, qwen3.7-max) — verified live 2026-08-11 20:50 MDT
-    // against Ade's sk-sp-... PAYG key. Default endpoint set in DEFAULT_QWEN_ENDPOINT
-    // below; key from tobi .env (DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY) or Copilot .env (QWEN_API_KEY).
+    // against Ade's sk-sp-... PAYG key. Default endpoint in DEFAULT_QWEN_ENDPOINT.
     models: [
       { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (frontier · 1M ctx)' },
       { id: 'qwen3.7-max', name: 'Qwen 3.7 Max' },
       { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus' },
-      { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash (fast)' },
-      { id: 'glm-5.2', name: 'GLM 5.2 (Token Plan)' },
-      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (Token Plan)' },
+      { id: 'qwen3.7-flash', name: 'Qwen 3.7 Flash' },
+      { id: 'qwen-coder-plus', name: 'Qwen Coder Plus' },
+      { id: 'glm-5.2', name: 'GLM 5.2 (QwenCloud)' },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (QwenCloud)' },
+      { id: 'deepseek-v4-flash-0731', name: 'DeepSeek V4 Flash (QwenCloud)' },
+    ],
+  },
+  dashscope: {
+    label: 'DashScope (regular · BROKEN for sk-sp-... keys)',
+    // Kept for completeness. The regular DashScope endpoint returns 401 for Ade's
+    // sk-sp-... PAYG keys — use the 'qwen' provider (Token Plan) instead.
+    // Default endpoint in DEFAULT_DASHSCOPE_ENDPOINT below.
+    models: [
+      { id: 'qwen3.7-max', name: 'Qwen 3.7 Max (DashScope)' },
+      { id: 'qwen3.7-plus', name: 'Qwen 3.7 Plus (DashScope)' },
+      { id: 'qwen3.6-flash', name: 'Qwen 3.6 Flash (DashScope)' },
     ],
   },
   openclaw: {
@@ -334,55 +429,6 @@ async function callOpenAI(messages: Message[], config: LLMConfig): Promise<LLMRe
   };
 }
 
-// ── Google Gemini ──
-async function callGemini(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
-  const systemMsg = messages.find((m) => m.role === 'system');
-  const conversationMsgs = messages.filter((m) => m.role !== 'system');
-
-  const contents = conversationMsgs.map((m) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts:
-      typeof m.content === 'string'
-        ? [{ text: m.content }]
-        : (m.content as ContentPart[]).map((part) => {
-            if (part.type === 'text') return { text: part.text! };
-            if (part.type === 'image_url') {
-              const dataUrl = part.image_url!.url;
-              const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
-              if (base64Match) {
-                return { inlineData: { mimeType: `image/${base64Match[1]}`, data: base64Match[2] } };
-              }
-            }
-            return { text: '' };
-          }),
-  }));
-
-  const data = await corsFetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${config.model}:generateContent?key=${config.apiKey}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents,
-        systemInstruction: systemMsg ? { parts: [{ text: systemMsg.content as string }] } : undefined,
-        generationConfig: {
-          temperature: config.temperature ?? 0.3,
-          maxOutputTokens: config.maxTokens || 4096,
-        },
-      }),
-    }
-  );
-
-  if (data.error) throw new Error(`Gemini: ${data.error.message}`);
-
-  return {
-    text: data.candidates?.[0]?.content?.parts?.[0]?.text || '',
-    provider: 'gemini',
-    model: config.model,
-    tokensUsed: data.usageMetadata?.candidatesTokenCount,
-  };
-}
-
 // ── Ollama (Cloud or Local) ──
 async function callOllama(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
   const endpoint = config.endpoint || 'https://api.ollama.com';
@@ -427,6 +473,186 @@ async function callOllama(messages: Message[], config: LLMConfig): Promise<LLMRe
     provider: 'ollama',
     model: config.model,
     tokensUsed: data.eval_count,
+  };
+}
+
+// ── Ollama Cloud (alt key · ollama2) ──
+// Same protocol as ollama, but uses the OLLAMA_OPENCLAW_AGENTS_API_KEY_2
+// (Tobi's second key) for parallel/rotation use cases.
+async function callOllama2(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_OLLAMA_ENDPOINT;
+  const result = await callOllama(messages, { ...config, endpoint });
+  return { ...result, provider: 'ollama2' };
+}
+
+// ── Google Gemini (native API, not OpenAI-compatible) ──
+// Endpoint: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}
+async function callGemini(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const systemMsg = messages.find((m) => m.role === 'system');
+  const conversationMsgs = messages.filter((m) => m.role !== 'system');
+
+  const contents = conversationMsgs.map((m) => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts:
+      typeof m.content === 'string'
+        ? [{ text: m.content }]
+        : (m.content as ContentPart[]).map((part) => {
+            if (part.type === 'text') return { text: part.text! };
+            if (part.type === 'image_url') {
+              const dataUrl = part.image_url!.url;
+              const base64Match = dataUrl.match(/^data:image\/(.*?);base64,(.*)$/);
+              if (base64Match) {
+                return { inlineData: { mimeType: `image/${base64Match[1]}`, data: base64Match[2] } };
+              }
+            }
+            return { text: '' };
+          }),
+  }));
+
+  const data = await corsFetch(
+    `${DEFAULT_GEMINI_ENDPOINT}/models/${config.model}:generateContent?key=${config.apiKey}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents,
+        systemInstruction: systemMsg ? { parts: [{ text: systemMsg.content as string }] } : undefined,
+        generationConfig: {
+          temperature: config.temperature ?? 0.3,
+          maxOutputTokens: config.maxTokens || 4096,
+        },
+      }),
+    }
+  );
+
+  if (data.error) throw new Error(`Gemini: ${data.error.message || data.error}`);
+  return {
+    text: data.candidates?.[0]?.content?.parts?.[0]?.text || '',
+    provider: 'gemini',
+    model: config.model,
+    tokensUsed: data.usageMetadata?.candidatesTokenCount,
+  };
+}
+
+// ── GLM via Z.AI (OpenAI-compatible) ──
+// Endpoint: https://api.z.ai/api/coding/paas/v4/chat/completions
+async function callZAI(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_ZAI_ENDPOINT;
+  const data = await corsFetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+    }),
+  });
+
+  if (data.error) throw new Error(`Z.AI: ${data.error.message || JSON.stringify(data.error)}`);
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    provider: 'zai',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
+// ── Kimi Code direct (OpenAI-compatible) ──
+// Endpoint: https://api.kimi.com/coding/v1/chat/completions
+async function callKimiCode(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_KIMI_ENDPOINT;
+  const data = await corsFetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+    }),
+  });
+
+  if (data.error) throw new Error(`Kimi: ${data.error.message || JSON.stringify(data.error)}`);
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    provider: 'kimi-code',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
+// ── PiAPI (OpenAI-compatible, PAYG) ──
+// Endpoint: https://api.piapi.ai/v1/chat/completions
+async function callPiAPI(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_PIAPI_ENDPOINT;
+  const data = await corsFetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+    }),
+  });
+
+  if (data.error) throw new Error(`PiAPI: ${data.error.message || JSON.stringify(data.error)}`);
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    provider: 'piapi',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
+// ── DashScope (regular Aliyun, OpenAI-compatible) ──
+// BROKEN for sk-sp-... PAYG keys (returns 401). Kept for completeness —
+// use the 'qwen' provider (Token Plan endpoint) instead.
+// Endpoint: https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions
+async function callDashScope(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || DEFAULT_DASHSCOPE_ENDPOINT;
+  const data = await corsFetch(`${endpoint}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => ({
+        role: m.role,
+        content: typeof m.content === 'string' ? m.content : (m.content as ContentPart[]).map((p) => p.text || '').join('\n'),
+      })),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+    }),
+  });
+
+  if (data.error) throw new Error(`DashScope: ${data.error.message || JSON.stringify(data.error)}`);
+  return {
+    text: data.choices?.[0]?.message?.content || '',
+    provider: 'dashscope',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
   };
 }
 
@@ -722,10 +948,20 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
       return callGemini(messages, config);
     case 'ollama':
       return callOllama(messages, config);
+    case 'ollama2':
+      return callOllama2(messages, config);
     case 'glm':
       return callGLM(messages, config);
+    case 'zai':
+      return callZAI(messages, config);
+    case 'kimi-code':
+      return callKimiCode(messages, config);
+    case 'piapi':
+      return callPiAPI(messages, config);
     case 'qwen':
       return callQwen(messages, config);
+    case 'dashscope':
+      return callDashScope(messages, config);
     case 'openclaw':
       return callOpenClaw(messages, config);
     case 'openrouter':
@@ -876,21 +1112,47 @@ export interface FallbackStep {
   provider: LLMProvider;
   model: string;
   /** Provider key in apiKeys whose presence enables this fallback. Use
-   *  'ollama' which is free and doesn't need a real key. */
-  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'qwen' | 'glm' | 'none';
-  /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. For 'qwen' defaults to Aliyun Token Plan. */
+   *  'none' (e.g. ollama when it accepts anon) or a specific key id. */
+  needsKey:
+    | 'anthropic' | 'minimax' | 'openai' | 'gemini' | 'ollama' | 'ollama2'
+    | 'openrouter' | 'openclaw' | 'gateway' | 'featherless'
+    | 'qwen' | 'glm' | 'zai' | 'kimi-code' | 'piapi' | 'dashscope'
+    | 'none';
+  /** Custom endpoint override. Falls back to provider's DEFAULT_*_ENDPOINT. */
   endpoint?: string;
 }
 
+// Comprehensive fallback ladder — covers Tobi's full provider set (~50 models).
+// Per Ade 21:02 MDT Aug 11: START with qwen (Ade's preferred), THEN minimax.
+// Then walk through every provider in Tobi's ladder, ordered roughly by
+// reliability/cost. Each step tries the provider's best/fastest model.
+// 'ollama' is `needsKey: 'none'` because the OLLAMA_API_KEY is auto-loaded
+// from Tobi's .env, and ollama cloud accepts a wide range of free models.
 export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
-  // Order matters — first success wins. The chain now has 5 fallbacks (was 2).
-  // Updated 2026-08-11 20:50 MDT per Ade directive: deeper fallthrough so a
-  // primary failure doesn't strand the user with "all N fallbacks also failed".
-  { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
-  { provider: 'ollama', model: 'deepseek-v4-pro', needsKey: 'none', endpoint: 'https://api.ollama.com' },
+  // 1. Qwen (Ade's preferred start — Token Plan endpoint, works with PAYG keys)
   { provider: 'qwen', model: 'qwen3.8-max', needsKey: 'qwen' },
+  // 2. MiniMax (Ade's 2nd preferred — direct, frontier 1M ctx)
+  { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
+  // 3. Ollama Cloud (free, auto-loaded OLLAMA_API_KEY, 11 models)
+  { provider: 'ollama', model: 'deepseek-v4-pro:cloud', needsKey: 'none' },
+  // 4. Z.AI (GLM coding endpoint, free-ish)
+  { provider: 'zai', model: 'glm-5.2', needsKey: 'zai' },
+  // 5. Kimi Code (direct, 1M ctx)
+  { provider: 'kimi-code', model: 'k3', needsKey: 'kimi-code' },
+  // 6. Google Gemini (GOOGLE_API_KEY auto-loaded)
+  { provider: 'gemini', model: 'gemini-3.5-flash', needsKey: 'gemini' },
+  // 7. Ollama alt key (parallel/rotation)
+  { provider: 'ollama2', model: 'kimi-k3:cloud', needsKey: 'ollama2' },
+  // 8. GLM direct (Zhipu AI, smaller scope)
   { provider: 'glm', model: 'glm-5.1', needsKey: 'glm' },
-  { provider: 'openai', model: 'gpt-4o-mini', needsKey: 'openai' },
+  // 9. Anthropic (last before paid — credit issues)
+  { provider: 'anthropic', model: 'claude-haiku-4-5-20251001', needsKey: 'anthropic' },
+  // 10. OpenAI (OAuth)
+  { provider: 'openai', model: 'gpt-5.5', needsKey: 'openai' },
+  // 11. OpenRouter
+  { provider: 'openrouter', model: 'auto', needsKey: 'openrouter' },
+  // 12. PiAPI (PAYG — last resort, has cost)
+  { provider: 'piapi', model: 'gpt-4o-mini', needsKey: 'piapi' },
 ];
 
 /**

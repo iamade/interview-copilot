@@ -206,17 +206,28 @@ function loadEnvKeys() {
   // Map env vars → electron-store apiKeys
   const currentKeys: Record<string, string> = store.get('apiKeys') || {};
   const keyMap: Record<string, string> = {
+    // Primary provider keys (Copilot .env)
     ANTHROPIC_API_KEY: 'anthropic',
     MINIMAX_API_KEY: 'minimax',
     OPENAI_API_KEY: 'openai',
     GEMINI_API_KEY: 'gemini',
-    GLM_API_KEY: 'glm',
     OLLAMA_API_KEY: 'ollama',
     OPENCLAW_API_KEY: 'openclaw',
     OPENROUTER_API_KEY: 'openrouter',
-    // Qwen — prefer the clean QWEN_API_KEY (Copilot .env) but fall back to
-    // DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY (Tobi's .env) per Ade 20:50 MDT Aug 11.
+    GLM_API_KEY: 'glm',
+    ZAI_API_KEY: 'zai',
+    KIMI_API_KEY: 'kimi-code',
+    PIAPI_API_KEY: 'piapi',
+    OLLAMA_API_KEY_2: 'ollama2',
     QWEN_API_KEY: 'qwen',
+    DASHSCOPE_API_KEY: 'dashscope',
+    // Tobi's .env fallbacks (per Ade 21:02 MDT Aug 11: use the keys from Tobi's .env)
+    ANTHROPIC_API_KEY_ORG_FALLBACK: 'anthropic',
+    GOOGLE_API_KEY: 'gemini',
+    OLLAMA_OPENCLAW_AGENTS_API_KEY_2: 'ollama2',
+    Z_AI_API_KEY: 'zai',
+    KIMI_API_KEY_MAC_OPENCLAW: 'kimi-code',
+    PIAPI_KEY_FOR_TOBI: 'piapi',
     DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY: 'qwen',
   };
 
@@ -256,6 +267,41 @@ function loadEnvKeys() {
   const qwenEndpoint = envVars['QWEN_OPENAI_COMPATIBLE_URL'] || envVars['QWEN_OpenAI_Compatible_URL'];
   if (qwenEndpoint && !currentEndpoints['qwen']) {
     currentEndpoints['qwen'] = qwenEndpoint;
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // DashScope endpoint (regular Aliyun) — same key as Qwen but different URL
+  if (envVars['DASHSCOPE_ENDPOINT'] && !currentEndpoints['dashscope']) {
+    currentEndpoints['dashscope'] = envVars['DASHSCOPE_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Ollama (1st key) — fallback to Tobi's OLLAMA_BASE_URL
+  if (envVars['OLLAMA_BASE_URL'] && !currentEndpoints['ollama']) {
+    currentEndpoints['ollama'] = envVars['OLLAMA_BASE_URL'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Ollama2 (alt key) — same endpoint, different key
+  if (envVars['OLLAMA_BASE_URL'] && !currentEndpoints['ollama2']) {
+    currentEndpoints['ollama2'] = envVars['OLLAMA_BASE_URL'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Z.AI endpoint
+  if (envVars['ZAI_ENDPOINT'] && !currentEndpoints['zai']) {
+    currentEndpoints['zai'] = envVars['ZAI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Kimi endpoint
+  if (envVars['KIMI_ENDPOINT'] && !currentEndpoints['kimi-code']) {
+    currentEndpoints['kimi-code'] = envVars['KIMI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // PiAPI endpoint
+  if (envVars['PIAPI_ENDPOINT'] && !currentEndpoints['piapi']) {
+    currentEndpoints['piapi'] = envVars['PIAPI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  // Gemini endpoint
+  if (envVars['GEMINI_ENDPOINT'] && !currentEndpoints['gemini']) {
+    currentEndpoints['gemini'] = envVars['GEMINI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
 }
