@@ -173,62 +173,47 @@ const store = new Store({
 
 // ── Load API keys from .env file ──
 // Seeds electron-store with keys from .env so the renderer can access them.
-// Also reads ~/.openclaw/.env as a secondary source — Tobi's env has the QWEN key
-// (DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY) + QWEN_OpenAI_Compatible_URL that the Copilot
-// needs for the Token Plan endpoint. Per Ade 20:50 MDT Aug 11 directive.
+// Per Ade 21:15 MDT Aug 11: only read from the Copilot's own .env — every
+// key the Copilot needs is now copied there directly. Do NOT fall back to
+// Tobi's ~/.openclaw/.env (per Ade: "dont map the apps .ev to tobis .env").
 function loadEnvKeys() {
   const envPath = path.join(__dirname, '../../.env');
-  const tobiEnvPath = '/Users/adesegunkoiki/.openclaw/.env';
+  if (!fs.existsSync(envPath)) return;
 
-  const readEnvFile = (filePath: string): Record<string, string> => {
-    if (!fs.existsSync(filePath)) return {};
-    const envContent = fs.readFileSync(filePath, 'utf-8');
-    const vars: Record<string, string> = {};
-    for (const line of envContent.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed || trimmed.startsWith('#')) continue;
-      const eqIdx = trimmed.indexOf('=');
-      if (eqIdx === -1) continue;
-      const key = trimmed.slice(0, eqIdx).trim();
-      let val = trimmed.slice(eqIdx + 1).trim();
-      // Strip surrounding quotes (Tobi's .env has quoted values; some may have nested escapes)
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
-      vars[key] = val;
+  const envContent = fs.readFileSync(envPath, 'utf-8');
+  const envVars: Record<string, string> = {};
+
+  for (const line of envContent.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    let val = trimmed.slice(eqIdx + 1).trim();
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
     }
-    return vars;
-  };
-
-  // Copilot .env takes precedence; Tobi .env is the secondary source
-  const envVars = { ...readEnvFile(tobiEnvPath), ...readEnvFile(envPath) };
+    envVars[key] = val;
+  }
 
   // Map env vars → electron-store apiKeys
   const currentKeys: Record<string, string> = store.get('apiKeys') || {};
   const keyMap: Record<string, string> = {
-    // Primary provider keys (Copilot .env)
     ANTHROPIC_API_KEY: 'anthropic',
     MINIMAX_API_KEY: 'minimax',
     OPENAI_API_KEY: 'openai',
     GEMINI_API_KEY: 'gemini',
     OLLAMA_API_KEY: 'ollama',
+    OLLAMA_API_KEY_2: 'ollama2',
     OPENCLAW_API_KEY: 'openclaw',
     OPENROUTER_API_KEY: 'openrouter',
     GLM_API_KEY: 'glm',
     ZAI_API_KEY: 'zai',
     KIMI_API_KEY: 'kimi-code',
     PIAPI_API_KEY: 'piapi',
-    OLLAMA_API_KEY_2: 'ollama2',
     QWEN_API_KEY: 'qwen',
     DASHSCOPE_API_KEY: 'dashscope',
-    // Tobi's .env fallbacks (per Ade 21:02 MDT Aug 11: use the keys from Tobi's .env)
-    ANTHROPIC_API_KEY_ORG_FALLBACK: 'anthropic',
-    GOOGLE_API_KEY: 'gemini',
-    OLLAMA_OPENCLAW_AGENTS_API_KEY_2: 'ollama2',
-    Z_AI_API_KEY: 'zai',
-    KIMI_API_KEY_MAC_OPENCLAW: 'kimi-code',
-    PIAPI_KEY_FOR_TOBI: 'piapi',
-    DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY: 'qwen',
   };
 
   let updated = false;
@@ -245,7 +230,7 @@ function loadEnvKeys() {
 
   if (updated) {
     store.set('apiKeys', currentKeys);
-    console.log('[Main] Loaded API keys from .env into store');
+    console.log('[Main] Loaded API keys from Copilot .env into store');
   }
 
   // Also load endpoints from .env
@@ -262,44 +247,26 @@ function loadEnvKeys() {
     currentEndpoints['minimax'] = envVars['MINIMAX_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // Qwen endpoint — prefer QWEN_OPENAI_COMPATIBLE_URL (Copilot .env) but
-  // fall back to QWEN_OpenAI_Compatible_URL (Tobi's .env, capital URL).
-  const qwenEndpoint = envVars['QWEN_OPENAI_COMPATIBLE_URL'] || envVars['QWEN_OpenAI_Compatible_URL'];
-  if (qwenEndpoint && !currentEndpoints['qwen']) {
-    currentEndpoints['qwen'] = qwenEndpoint;
+  if (envVars['QWEN_OPENAI_COMPATIBLE_URL'] && !currentEndpoints['qwen']) {
+    currentEndpoints['qwen'] = envVars['QWEN_OPENAI_COMPATIBLE_URL'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // DashScope endpoint (regular Aliyun) — same key as Qwen but different URL
   if (envVars['DASHSCOPE_ENDPOINT'] && !currentEndpoints['dashscope']) {
     currentEndpoints['dashscope'] = envVars['DASHSCOPE_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // Ollama (1st key) — fallback to Tobi's OLLAMA_BASE_URL
-  if (envVars['OLLAMA_BASE_URL'] && !currentEndpoints['ollama']) {
-    currentEndpoints['ollama'] = envVars['OLLAMA_BASE_URL'];
-    store.set('customEndpoints', currentEndpoints);
-  }
-  // Ollama2 (alt key) — same endpoint, different key
-  if (envVars['OLLAMA_BASE_URL'] && !currentEndpoints['ollama2']) {
-    currentEndpoints['ollama2'] = envVars['OLLAMA_BASE_URL'];
-    store.set('customEndpoints', currentEndpoints);
-  }
-  // Z.AI endpoint
   if (envVars['ZAI_ENDPOINT'] && !currentEndpoints['zai']) {
     currentEndpoints['zai'] = envVars['ZAI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // Kimi endpoint
   if (envVars['KIMI_ENDPOINT'] && !currentEndpoints['kimi-code']) {
     currentEndpoints['kimi-code'] = envVars['KIMI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // PiAPI endpoint
   if (envVars['PIAPI_ENDPOINT'] && !currentEndpoints['piapi']) {
     currentEndpoints['piapi'] = envVars['PIAPI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
-  // Gemini endpoint
   if (envVars['GEMINI_ENDPOINT'] && !currentEndpoints['gemini']) {
     currentEndpoints['gemini'] = envVars['GEMINI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
