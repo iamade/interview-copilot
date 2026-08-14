@@ -2,6 +2,8 @@ import { app, BrowserWindow, ipcMain, desktopCapturer, screen, globalShortcut, d
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
+import { initDb, addQa, listQaBySession, listAllQa, listSessions, deleteQa, clearSession, countQaBySession, type QaRole } from './db';
+import { randomUUID } from 'crypto';
 
 // ── Local Whisper server (faster-whisper) ──
 // Transcription runs fully on-device. We spawn the Python server once on
@@ -171,6 +173,9 @@ const store = new Store({
 
 // ── Load API keys from .env file ──
 // Seeds electron-store with keys from .env so the renderer can access them.
+// Per Ade 21:15 MDT Aug 11: only read from the Copilot's own .env — every
+// key the Copilot needs is now copied there directly. Do NOT fall back to
+// Tobi's ~/.openclaw/.env (per Ade: "dont map the apps .ev to tobis .env").
 function loadEnvKeys() {
   const envPath = path.join(__dirname, '../../.env');
   if (!fs.existsSync(envPath)) return;
@@ -199,10 +204,16 @@ function loadEnvKeys() {
     MINIMAX_API_KEY: 'minimax',
     OPENAI_API_KEY: 'openai',
     GEMINI_API_KEY: 'gemini',
-    GLM_API_KEY: 'glm',
     OLLAMA_API_KEY: 'ollama',
+    OLLAMA_API_KEY_2: 'ollama2',
     OPENCLAW_API_KEY: 'openclaw',
     OPENROUTER_API_KEY: 'openrouter',
+    GLM_API_KEY: 'glm',
+    ZAI_API_KEY: 'zai',
+    KIMI_API_KEY: 'kimi-code',
+    PIAPI_API_KEY: 'piapi',
+    QWEN_API_KEY: 'qwen',
+    DASHSCOPE_API_KEY: 'dashscope',
   };
 
   let updated = false;
@@ -219,7 +230,7 @@ function loadEnvKeys() {
 
   if (updated) {
     store.set('apiKeys', currentKeys);
-    console.log('[Main] Loaded API keys from .env into store');
+    console.log('[Main] Loaded API keys from Copilot .env into store');
   }
 
   // Also load endpoints from .env
@@ -234,6 +245,30 @@ function loadEnvKeys() {
   }
   if (envVars['MINIMAX_ENDPOINT'] && !currentEndpoints['minimax']) {
     currentEndpoints['minimax'] = envVars['MINIMAX_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['QWEN_OPENAI_COMPATIBLE_URL'] && !currentEndpoints['qwen']) {
+    currentEndpoints['qwen'] = envVars['QWEN_OPENAI_COMPATIBLE_URL'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['DASHSCOPE_ENDPOINT'] && !currentEndpoints['dashscope']) {
+    currentEndpoints['dashscope'] = envVars['DASHSCOPE_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['ZAI_ENDPOINT'] && !currentEndpoints['zai']) {
+    currentEndpoints['zai'] = envVars['ZAI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['KIMI_ENDPOINT'] && !currentEndpoints['kimi-code']) {
+    currentEndpoints['kimi-code'] = envVars['KIMI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['PIAPI_ENDPOINT'] && !currentEndpoints['piapi']) {
+    currentEndpoints['piapi'] = envVars['PIAPI_ENDPOINT'];
+    store.set('customEndpoints', currentEndpoints);
+  }
+  if (envVars['GEMINI_ENDPOINT'] && !currentEndpoints['gemini']) {
+    currentEndpoints['gemini'] = envVars['GEMINI_ENDPOINT'];
     store.set('customEndpoints', currentEndpoints);
   }
 }
@@ -330,6 +365,93 @@ function createSettingsWindow() {
 ipcMain.handle('store:get', (_event, key: string) => store.get(key));
 ipcMain.handle('store:set', (_event, key: string, value: any) => store.set(key, value));
 ipcMain.handle('store:getAll', () => store.store);
+
+// ── Q&A persistence (AFD-166) ──
+// All Q&A events from the renderer hit these IPCs; the underlying store is
+// SQLite (better-sqlite3) in userData/interview-copilot.db. Survives Cmd+R,
+// renderer reload, full app restart. The session_id is generated on first
+// call to qa:ensureSession and persisted in electron-store.
+ipcMain.handle('qa:ensureSession', () => {
+  const existing = store.get('currentSessionId') as string | undefined;
+  if (existing) return existing;
+  const id = randomUUID();
+  store.set('currentSessionId', id);
+  console.log(`[qa] New session created: ${id}`);
+  return id;
+});
+
+ipcMain.handle('qa:newSession', () => {
+  const id = randomUUID();
+  store.set('currentSessionId', id);
+  console.log(`[qa] Session rotated to: ${id}`);
+  return id;
+});
+
+ipcMain.handle('qa:getCurrentSession', () => {
+  return (store.get('currentSessionId') as string | undefined) ?? null;
+});
+
+ipcMain.handle('qa:setCurrentSession', (_event, sessionId: string) => {
+  if (typeof sessionId !== 'string' || !sessionId) {
+    throw new Error('qa:setCurrentSession requires a non-empty sessionId');
+  }
+  store.set('currentSessionId', sessionId);
+  return sessionId;
+});
+
+ipcMain.handle('qa:add', (_event, payload: {
+  session_id: string;
+  role: QaRole;
+  text: string;
+  meta?: Record<string, any> | null;
+}) => {
+  // Whitelist role to keep CHECK constraint strict even if renderer sends garbage
+  const allowedRoles: QaRole[] = ['interviewer', 'me', 'system', 'tool'];
+  if (!allowedRoles.includes(payload.role)) {
+    throw new Error(`qa:add invalid role "${payload.role}"`);
+  }
+  if (!payload.text || typeof payload.text !== 'string') {
+    throw new Error('qa:add requires non-empty text');
+  }
+  const id = addQa({
+    session_id: payload.session_id,
+    role: payload.role,
+    text: payload.text,
+    meta: payload.meta ?? null,
+  });
+  return { id };
+});
+
+ipcMain.handle('qa:listBySession', (_event, sessionId: string) => {
+  if (!sessionId) return [];
+  return listQaBySession(sessionId);
+});
+
+ipcMain.handle('qa:listAll', (_event, limit = 200) => {
+  return listAllQa(limit);
+});
+
+ipcMain.handle('qa:listSessions', (_event, limit = 50) => {
+  return listSessions(limit);
+});
+
+ipcMain.handle('qa:delete', (_event, id: number) => {
+  if (typeof id !== 'number' || !Number.isFinite(id)) {
+    throw new Error('qa:delete requires numeric id');
+  }
+  const ok = deleteQa(id);
+  return { ok };
+});
+
+ipcMain.handle('qa:clearSession', (_event, sessionId: string) => {
+  if (!sessionId) return { deleted: 0 };
+  const deleted = clearSession(sessionId);
+  return { deleted };
+});
+
+ipcMain.handle('qa:countBySession', (_event, sessionId: string) => {
+  return { count: sessionId ? countQaBySession(sessionId) : 0 };
+});
 
 // ── CORS-free fetch proxy ──
 // All LLM API calls go through here to bypass browser CORS restrictions
@@ -628,6 +750,14 @@ ipcMain.handle('dialog:openFiles', async (_event, options: { title: string; filt
 // ── App lifecycle ──
 
 app.whenReady().then(() => {
+  // ── SQLite (AFD-166) ──
+  // Open the DB before anything else so the renderer's first IPC works.
+  try {
+    initDb();
+  } catch (e) {
+    console.error('[main] Failed to initialize SQLite DB:', e);
+  }
+
   // ── Media permissions: auto-approve microphone & screen capture ──
   // This prevents the "bad IPC message" crash when requesting audio
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
