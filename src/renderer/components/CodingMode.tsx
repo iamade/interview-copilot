@@ -1,13 +1,27 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { screenCaptureService, type WindowSource } from '../services/screenCaptureService';
+import { audioService, type TranscriptionChunk } from '../services/audioService';
 
 interface Props {
   isGenerating: boolean;
   codingProblem: string;
   codingSolution: string;
   programmingLanguage: string;
+  // 2026-08-17 P0 fix — Coding mode now combines SCREEN + AUDIO. The
+  // parent (App.tsx) owns the audio state (transcript buffer, listening
+  // flag) so it can stay shared with Interview mode if the user switches
+  // mid-session. The Coding mode only renders the toggle + preview.
+  isListening: boolean;
+  audioTranscript: string;
+  audioLevel: number;
+  audioSilentSeconds: number;
+  permissionStatus: 'granted' | 'denied' | 'restricted' | 'unknown' | 'not-determined' | 'unchecked';
+  permissionMessage: string;
+  onStartAudio: () => void;
+  onStopAudio: () => void;
+  onCheckPermission: () => void;
   onCapture: () => void;
-  onSolve: (problem: string) => Promise<void>;
+  onSolve: (problem: string, audioTranscript?: string) => Promise<void>;
   onSetLanguage: (lang: string) => void;
   fontSize: number;
 }
@@ -21,6 +35,15 @@ export default function CodingMode({
   codingProblem,
   codingSolution,
   programmingLanguage,
+  isListening,
+  audioTranscript,
+  audioLevel,
+  audioSilentSeconds,
+  permissionStatus,
+  permissionMessage,
+  onStartAudio,
+  onStopAudio,
+  onCheckPermission,
   onCapture,
   onSolve,
   onSetLanguage,
@@ -39,9 +62,20 @@ export default function CodingMode({
     }
   }, [codingSolution]);
 
+  // 2026-08-17 P0 fix — pre-flight the macOS Screen Recording permission
+  // the first time the user enters Coding mode so we can show a banner
+  // BEFORE they click Capture & Solve (the previous UX silently sent a
+  // 1x1 black PNG to the LLM, which replied "I can't see any coding
+  // question" and confused Ade on his interview).
+  useEffect(() => {
+    if (permissionStatus === 'unchecked') {
+      onCheckPermission();
+    }
+  }, [permissionStatus, onCheckPermission]);
+
   async function handleManualSolve() {
     if (manualProblem.trim()) {
-      await onSolve(manualProblem.trim());
+      await onSolve(manualProblem.trim(), audioTranscript);
     }
   }
 
@@ -57,16 +91,38 @@ export default function CodingMode({
   async function handlePickWindow(win: WindowSource) {
     const capture = await screenCaptureService.captureWindow(win.id);
     setShowWindowPicker(false);
-    setPickedWindowName(win.name);
-    if (capture) {
-      // Use the existing onCapture callback chain so the rest of the
-      // screen-capture → analyze → solve flow runs unchanged.
+    if (capture.ok) {
+      setPickedWindowName(win.name);
       onCapture();
+    } else {
+      // Surface the error inline so the user knows why the picker didn't work.
+      alert(`Window capture failed: ${capture.message}`);
     }
   }
 
+  // Visual cue for the audio level meter (used when audio is on).
+  const meterWidth = Math.min(100, Math.max(2, audioLevel * 100));
+
   return (
     <div className="flex flex-col gap-2 h-full">
+      {/* 2026-08-17 P0 fix — permission banner. If the macOS Screen
+          Recording permission is not granted, the screenshot path returns
+          a 1x1 black PNG and the LLM says "I can't see any coding
+          question". Catch that BEFORE the user clicks Capture. */}
+      {permissionStatus === 'denied' || permissionStatus === 'restricted' || permissionStatus === 'not-determined' ? (
+        <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] leading-relaxed">
+          <div className="font-semibold mb-0.5">⚠️ Screen Recording permission required</div>
+          <div className="text-amber-200/80">
+            {permissionMessage ||
+              'Open System Settings → Privacy & Security → Screen Recording → enable Interview Copilot, then restart the app.'}
+          </div>
+        </div>
+      ) : permissionStatus === 'unknown' ? (
+        <div className="px-3 py-1.5 rounded-lg bg-gray-800/40 border border-gray-700/30 text-gray-400 text-[10px]">
+          Checking screen-capture permission…
+        </div>
+      ) : null}
+
       {/* Controls */}
       <div className="flex items-center gap-2">
         <button
@@ -101,6 +157,23 @@ export default function CodingMode({
           🪟
         </button>
 
+        {/* 2026-08-17 P0 fix — toggle system-audio capture (interviewer's
+            voice). When ON, the audio transcript gets spliced into the
+            LLM prompt alongside the screenshot so the model sees BOTH
+            the on-screen LeetCode question AND what the interviewer said. */}
+        <button
+          onClick={isListening ? onStopAudio : onStartAudio}
+          disabled={isGenerating}
+          className={`px-2 py-2 rounded-lg text-xs border transition-all disabled:opacity-40 ${
+            isListening
+              ? 'bg-red-600/80 hover:bg-red-600 text-white border-red-500/40'
+              : 'bg-gray-800/60 hover:bg-gray-700/60 text-gray-300 border-gray-700/40'
+          }`}
+          title={isListening ? 'Stop capturing interviewer audio' : 'Start capturing interviewer audio (uses system audio loopback)'}
+        >
+          {isListening ? '🔴 Stop' : '🎤 Audio'}
+        </button>
+
         {/* Language selector */}
         <select
           value={programmingLanguage}
@@ -114,6 +187,43 @@ export default function CodingMode({
           ))}
         </select>
       </div>
+
+      {/* 2026-08-17 P0 fix — live audio level + silence warning. Surfaces
+          whether the system-audio loopback is actually picking up sound
+          (vs. silently broken — wrong output device, denied permission,
+          etc.). The 5-second silence warning mirrors InterviewMode. */}
+      {isListening && (
+        <div className="rounded-lg bg-gray-900/60 border border-red-700/30 px-2 py-1.5 flex items-center gap-2 fade-in">
+          <div className="flex items-center gap-1">
+            <div className="w-1.5 h-1.5 rounded-full bg-red-500 pulse-dot" />
+            <span className="text-[9px] text-red-300 font-semibold uppercase tracking-wider">Listening</span>
+          </div>
+          <div className="flex-1 h-1.5 rounded-full bg-gray-800 overflow-hidden">
+            <div
+              className="h-full bg-gradient-to-r from-green-500 via-yellow-500 to-red-500 transition-all"
+              style={{ width: `${meterWidth}%` }}
+            />
+          </div>
+          <span className="text-[9px] text-gray-500 tabular-nums">{Math.round(audioLevel * 100)}%</span>
+          {audioSilentSeconds > 5 && (
+            <span className="text-[9px] text-amber-400" title="No audio detected — check macOS system-audio permission or your output device">
+              ⚠ silent {Math.round(audioSilentSeconds)}s
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* 2026-08-17 P0 fix — last captured audio transcript preview. Shows
+          the latest interviewer voice captured so the user knows audio is
+          working and can copy it into the LLM context. */}
+      {isListening && audioTranscript && (
+        <div className="rounded-lg bg-gray-900/40 border border-gray-700/30 px-2 py-1.5 fade-in">
+          <div className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5">Last interviewer voice</div>
+          <div className="text-[10px] text-gray-300 leading-snug max-h-12 overflow-y-auto">
+            {audioTranscript.slice(-300)}
+          </div>
+        </div>
+      )}
 
       {/* P0 fix 1.4 — window picker overlay. */}
       {showWindowPicker && (

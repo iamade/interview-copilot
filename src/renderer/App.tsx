@@ -330,7 +330,22 @@ RULES:
     return prompt;
   }
 
-  // ── Coding Mode: Screenshot → OCR → Solution ──
+  // 2026-08-17 P0 fix — pre-flight macOS Screen Recording permission state
+  // for Coding mode. The previous UX silently passed a 1x1 black PNG to
+  // the LLM when permission was denied, which is exactly what Ade hit on
+  // his LeetCode interview. We now show a banner BEFORE the user clicks
+  // Capture & Solve.
+  const [screenPermission, setScreenPermission] = useState<{
+    status: 'granted' | 'denied' | 'restricted' | 'unknown' | 'not-determined' | 'unchecked';
+    message: string;
+  }>({ status: 'unchecked', message: '' });
+
+  async function checkScreenPermission() {
+    const result = await screenCaptureService.checkPermission();
+    setScreenPermission({ status: result.status, message: result.message });
+  }
+
+  // ── Coding Mode: Screenshot → OCR → Solution (+ optional audio) ──
 
   async function captureAndAnalyzeScreen() {
     setError(null);
@@ -339,21 +354,43 @@ RULES:
     setCodingSolution('');
 
     try {
-      const screenshot = await screenCaptureService.takeScreenshot();
-      if (!screenshot) throw new Error('Failed to capture screenshot');
+      const capture = await screenCaptureService.takeScreenshot();
+
+      // 2026-08-17 P0 fix — handle the discriminated CaptureResult. If
+      // permission was denied, the IPC returns a typed error; we surface
+      // it inline AND re-check permission state so the banner updates.
+      if (!capture.ok) {
+        // Refresh permission banner so the user knows what to fix.
+        if (capture.error === 'permission-denied' || capture.error === 'no-source') {
+          await checkScreenPermission();
+        }
+        throw new Error(capture.message);
+      }
+
+      const screenshot = { base64: capture.base64, timestamp: capture.timestamp };
+
+      // Capture a snapshot of the current audio transcript so the LLM
+      // sees the interviewer's voice alongside the screen. Don't pass
+      // the live `currentTranscript` state because that may update
+      // between the analyze call and the solve call — a frozen snapshot
+      // keeps the two calls consistent.
+      const audioSnapshot = transcriptBuffer.current.trim();
 
       // Step 1: Extract the coding problem from the screenshot
       const problem = await screenCaptureService.analyzeScreenForCode(screenshot, getLLMConfig(), {
         jobDescription: userContext.jobDescription,
         programmingLanguage: userContext.programmingLanguage,
+        audioTranscript: audioSnapshot || undefined,
       });
       setCodingProblem(problem);
 
-      // Step 2: Solve the problem
+      // Step 2: Solve the problem (with the same audio snapshot so the
+      // model also picks up any clarifications the interviewer said).
       const solution = await screenCaptureService.solveCodingProblem(problem, getLLMConfig(), {
         programmingLanguage: userContext.programmingLanguage,
         resumeContext: userContext.resumeText,
         additionalNotes: userContext.additionalNotes,
+        audioTranscript: audioSnapshot || undefined,
       });
       setCodingSolution(solution);
 
@@ -499,14 +536,33 @@ RULES:
             codingProblem={codingProblem}
             codingSolution={codingSolution}
             programmingLanguage={userContext.programmingLanguage}
+            isListening={isListening}
+            audioTranscript={currentTranscript}
+            audioLevel={audioLevel}
+            audioSilentSeconds={audioSilentSeconds}
+            permissionStatus={screenPermission.status}
+            permissionMessage={screenPermission.message}
+            onStartAudio={startListening}
+            onStopAudio={stopListening}
+            onCheckPermission={checkScreenPermission}
             onCapture={captureAndAnalyzeScreen}
-            onSolve={(problem) =>
-              screenCaptureService
-                .solveCodingProblem(problem, getLLMConfig(), {
+            onSolve={async (problem, audioOverride) =>
+              {
+                // 2026-08-17 P0 fix — manual "Solve Pasted Problem" path
+                // also needs to splice the live audio transcript in,
+                // otherwise the user pastes a problem they couldn't get
+                // from the screen but loses the interviewer's spoken
+                // clarifications.
+                const audio = (audioOverride && audioOverride.trim()) || transcriptBuffer.current.trim();
+                const solution = await screenCaptureService.solveCodingProblem(problem, getLLMConfig(), {
                   programmingLanguage: userContext.programmingLanguage,
                   resumeContext: userContext.resumeText,
-                })
-                .then(setCodingSolution)
+                  additionalNotes: userContext.additionalNotes,
+                  audioTranscript: audio || undefined,
+                });
+                setCodingSolution(solution);
+                setCodingProblem(problem);
+              }
             }
             onSetLanguage={(lang) => setUserContext((prev) => ({ ...prev, programmingLanguage: lang }))}
             fontSize={settings.fontSize}

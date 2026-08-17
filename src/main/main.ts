@@ -492,11 +492,43 @@ ipcMain.handle('capture:screenshot', async () => {
     thumbnailSize: { width: 1920, height: 1080 },
   });
 
-  if (sources.length > 0) {
-    const screenshot = sources[0].thumbnail.toPNG();
-    return screenshot.toString('base64');
+  if (sources.length === 0) {
+    return { ok: false, error: 'no-source' as const, message: 'No screen source available — try plugging in an external display or check macOS Screen Recording permission.' };
   }
-  return null;
+
+  const thumb = sources[0].thumbnail;
+  // macOS returns a 1x1 black thumbnail when Screen Recording permission is
+  // not granted. Detect that on the NativeImage BEFORE serializing so the
+  // UI can tell the user exactly what to fix instead of silently passing a
+  // blank image to the LLM (which then says "I can't see any coding
+  // question").
+  const size = thumb.getSize();
+  if (size.width < 100 || size.height < 100) {
+    return {
+      ok: false,
+      error: 'permission-denied' as const,
+      message:
+        'macOS Screen Recording permission is not granted. Open System Settings → Privacy & Security → Screen Recording → enable Interview Copilot, then restart the app.',
+    };
+  }
+  const png = thumb.toPNG();
+  return { ok: true, base64: png.toString('base64'), timestamp: Date.now() };
+});
+
+// P0 fix 2026-08-17 — check macOS Screen Recording permission up front so
+// the UI can show a "permission required" warning BEFORE the user clicks
+// Capture & Solve. Uses Electron's getMediaAccessStatus which returns
+// 'granted' | 'denied' | 'restricted' | 'unknown' | 'not-determined'.
+ipcMain.handle('capture:checkScreenPermission', () => {
+  if (process.platform !== 'darwin') {
+    return { status: 'granted' as const, platform: process.platform, message: 'Screen capture unrestricted on non-macOS.' };
+  }
+  const status = systemPreferences.getMediaAccessStatus('screen');
+  const message =
+    status === 'granted'
+      ? 'Screen Recording permission is granted.'
+      : 'Screen Recording permission is NOT granted. Open System Settings → Privacy & Security → Screen Recording → enable Interview Copilot, then restart the app.';
+  return { status, platform: 'darwin' as const, message };
 });
 
 // List open windows for the candidate to pick from (P0 fix 1.4).
@@ -520,14 +552,26 @@ ipcMain.handle('capture:listWindows', async () => {
 
 // Capture a specific window by its desktopCapturer source id.
 ipcMain.handle('capture:window', async (_event, sourceId: string) => {
-  if (!sourceId) return null;
+  if (!sourceId) return { ok: false, error: 'no-source-id' as const, message: 'No window id provided.' };
   const sources = await desktopCapturer.getSources({
     types: ['window'],
     thumbnailSize: { width: 1920, height: 1080 },
   });
   const target = sources.find((s) => s.id === sourceId);
-  if (!target) return null;
-  return target.thumbnail.toPNG().toString('base64');
+  if (!target) return { ok: false, error: 'window-not-found' as const, message: 'That window is no longer open.' };
+  const thumb = target.thumbnail;
+  // Same 1x1 thumbnail guard as capture:screenshot — surface a clean
+  // permission error instead of silently sending a blank image to the LLM.
+  const size = thumb.getSize();
+  if (size.width < 100 || size.height < 100) {
+    return {
+      ok: false,
+      error: 'permission-denied' as const,
+      message:
+        'Window capture returned a 1x1 thumbnail — macOS Screen Recording permission is not granted. Open System Settings → Privacy & Security → Screen Recording → enable Interview Copilot, then restart the app.',
+    };
+  }
+  return { ok: true, base64: thumb.toPNG().toString('base64'), timestamp: Date.now() };
 });
 
 // System audio capture - get available audio sources

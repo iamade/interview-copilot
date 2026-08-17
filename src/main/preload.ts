@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // (VS Code, LeetCode, etc.) instead of always grabbing the whole screen.
   listWindows: () => ipcRenderer.invoke('capture:listWindows'),
   captureWindow: (sourceId: string) => ipcRenderer.invoke('capture:window', sourceId),
+  // P0 fix 2026-08-17 — pre-flight macOS Screen Recording permission check
+  checkScreenPermission: () => ipcRenderer.invoke('capture:checkScreenPermission'),
 
   // File dialog
   openFile: (options: { title: string; filters?: any[] }) => ipcRenderer.invoke('dialog:openFile', options),
