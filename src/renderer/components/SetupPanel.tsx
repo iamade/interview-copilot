@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import type { UserContext, SettingsState } from '../types';
 import type { LLMProvider } from '../services/llmService';
-import { PROVIDER_MODELS } from '../services/llmService';
+import { PROVIDER_MODELS, getProvidersForEngine } from '../services/llmService';
 import { EngineSelector } from './SettingsPanel';
 
 interface Props {
@@ -478,11 +478,14 @@ export default function SetupPanel({
               }}
               className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
             >
-              {Object.entries(PROVIDER_MODELS).map(([key, val]) => (
-                <option key={key} value={key}>
-                  {val.label}
-                </option>
-              ))}
+              {getProvidersForEngine(settings.engine).map((key) => {
+                const val = PROVIDER_MODELS[key];
+                return (
+                  <option key={key} value={key}>
+                    {val.label}
+                  </option>
+                );
+              })}
             </select>
           </div>
 
@@ -502,11 +505,10 @@ export default function SetupPanel({
             </select>
           </div>
 
-          {/* API Key for selected provider (including Ollama Cloud) */}
+          {/* API Key (Direct engine only — OAuth keys come from .env) */}
+          {settings.engine === 'direct' && settings.provider !== 'ollama_local' && (
           <div>
-            <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">
-              {settings.provider === 'ollama' ? 'Ollama Cloud API Key' : 'API Key'}
-            </label>
+            <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">API Key</label>
             <input
               type="password"
               value={settings.apiKeys[settings.provider] || ''}
@@ -516,27 +518,82 @@ export default function SetupPanel({
                   apiKeys: { ...settings.apiKeys, [settings.provider]: e.target.value },
                 })
               }
-              placeholder={settings.provider === 'ollama' ? 'Enter Ollama Cloud API key...' : `Enter ${PROVIDER_MODELS[settings.provider]?.label} API key...`}
+              placeholder={`Enter ${PROVIDER_MODELS[settings.provider]?.label} API key...`}
               className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
             />
           </div>
+          )}
 
-          {/* Ollama endpoint */}
-          {settings.provider === 'ollama' && (
+          {/* Ollama Cloud endpoint (OAuth) */}
+          {settings.provider === 'ollama_cloud' && (
             <div>
               <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">Ollama Cloud Endpoint</label>
               <input
                 type="text"
                 value={settings.ollamaEndpoint}
                 onChange={(e) => onUpdateSettings({ ...settings, ollamaEndpoint: e.target.value })}
-                placeholder="http://localhost:11434"
-                className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
+                placeholder="https://api.ollama.com"
+                className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
               />
             </div>
           )}
 
-          {/* Custom endpoint for OpenClaw/Custom */}
-          {(settings.provider === 'openclaw' || settings.provider === 'custom') && (
+          {/* Ollama Local endpoint */}
+          {settings.provider === 'ollama_local' && (
+            <div>
+              <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">Ollama Local Endpoint</label>
+              <input
+                type="text"
+                value={settings.ollamaLocalEndpoint}
+                onChange={(e) => onUpdateSettings({ ...settings, ollamaLocalEndpoint: e.target.value })}
+                placeholder="http://localhost:11434"
+                className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
+              />
+            </div>
+          )}
+
+          {/* 2026-08-17 — Vision model override (Coding mode screen-capture). */}
+          <div>
+            <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">
+              Vision Model (Coding mode · for screen-capture)
+            </label>
+            <select
+              value={settings.visionProvider || 'qwen'}
+              onChange={(e) => {
+                const vp = e.target.value as LLMProvider;
+                const firstVision = PROVIDER_MODELS[vp]?.models.find((m) => /vl|vision|gpt-4o|gemini|claude|llava/i.test(m.id + m.name))?.id
+                  || PROVIDER_MODELS[vp]?.models[0]?.id || '';
+                onUpdateSettings({ ...settings, visionProvider: vp, visionModel: firstVision });
+              }}
+              className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
+            >
+              {getProvidersForEngine(settings.engine).map((key) => {
+                const val = PROVIDER_MODELS[key];
+                return (
+                  <option key={key} value={key}>
+                    {val.label}
+                  </option>
+                );
+              })}
+            </select>
+            <select
+              value={settings.visionModel || ''}
+              onChange={(e) => onUpdateSettings({ ...settings, visionModel: e.target.value })}
+              className="w-full mt-1 px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
+            >
+              {(PROVIDER_MODELS[settings.visionProvider || 'qwen']?.models || []).map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <div className="text-[9px] text-gray-500 mt-0.5">
+              Used to OCR the LeetCode screenshot. Default: qwen-vl-max.
+            </div>
+          </div>
+
+          {/* Custom endpoint */}
+          {settings.provider === 'custom' && (
             <div>
               <label className="text-[9px] text-gray-500 uppercase tracking-wider mb-0.5 block">Endpoint URL</label>
               <input
@@ -549,7 +606,7 @@ export default function SetupPanel({
                   })
                 }
                 placeholder="https://api.example.com/v1/chat/completions"
-                className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs placeholder-gray-600 focus:outline-none focus:border-blue-500/50"
+                className="w-full px-2 py-1.5 rounded-lg bg-gray-800/60 border border-gray-700/40 text-gray-200 text-xs focus:outline-none focus:border-blue-500/50"
               />
             </div>
           )}

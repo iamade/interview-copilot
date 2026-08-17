@@ -44,8 +44,23 @@ export interface UserContext {
 export interface SettingsState {
   provider: LLMProvider;
   model: string;
+  // 2026-08-17 — engine = top-level auth method. 'oauth' = keys are
+  // managed by OpenClaw gateway (OLLAMA_API_KEY, OPENROUTER_API_KEY,
+  // FEATHERLESSAI_OPENCLAW_KEYS, etc.); 'direct' = keys are the
+  // provider's own (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY,
+  // QWEN_API_KEY, etc.). The provider dropdown is filtered by engine
+  // so the user only sees the providers reachable with that auth.
+  engine: 'oauth' | 'direct';
+  // Optional separate vision model for screen-capture (Coding mode).
+  // If set, the analyzeScreenForCode step uses this model instead of
+  // the primary; the solveCodingProblem step still uses the primary.
+  // Vision models are cheap and fast at reading images, then a
+  // reasoning model writes the actual solution.
+  visionProvider?: LLMProvider;
+  visionModel?: string;
   apiKeys: Record<string, string>;
   ollamaEndpoint: string;
+  ollamaLocalEndpoint: string;
   customEndpoints: Record<string, string>;
   overlayOpacity: number;
   fontSize: number;

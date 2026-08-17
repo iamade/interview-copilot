@@ -3,12 +3,22 @@ import type { SettingsState, UserContext } from '../types';
 import type { LLMProvider } from '../services/llmService';
 import { PROVIDER_MODELS } from '../services/llmService';
 
-// ── Engine quick-select: Ollama (default) / Featherless / Direct (legacy) ──
-const ENGINES: { key: string; label: string; sub: string; provider: LLMProvider; model: string }[] = [
-  // Ollama Cloud deepseek-v4-pro is the verified free path (key seeded from .env).
-  { key: 'ollama', label: 'Ollama', sub: 'default · free · deepseek-v4-pro', provider: 'ollama', model: 'deepseek-v4-pro' },
-  { key: 'glm', label: 'GLM 5.1', sub: 'alternative · free', provider: 'ollama', model: 'glm-5.1' },
-  { key: 'direct', label: 'Direct API', sub: 'legacy (Gemini/Claude/…)', provider: 'gemini', model: 'gemini-2.5-flash' },
+// 2026-08-17 — engine quick-select: just OAuth/Gateway vs Direct API.
+// The user wanted only 2 options (not 3) since the previous 3-option
+// "Ollama / GLM 5.1 / Direct API" layout was confusing — the new
+// design treats Ollama and GLM as just providers under the OAuth
+// bucket, not engines of their own.
+const ENGINES: { key: 'oauth' | 'direct'; label: string; sub: string }[] = [
+  {
+    key: 'oauth',
+    label: 'OAuth / Gateway',
+    sub: 'OpenClaw-managed keys (Ollama, OpenRouter, Featherless, HF). Free tier available.',
+  },
+  {
+    key: 'direct',
+    label: 'Direct API',
+    sub: "Provider's own key (Anthropic, OpenAI, Gemini, Qwen, GLM, Kimi). PAYG.",
+  },
 ];
 
 export function EngineSelector({
@@ -18,30 +28,36 @@ export function EngineSelector({
   settings: SettingsState;
   onUpdateSettings: (s: SettingsState) => void;
 }) {
-  const isDirect = settings.provider !== 'ollama' && settings.provider !== 'gateway_ollama' && settings.provider !== 'featherless';
-  const active =
-    settings.provider === 'ollama' && settings.model === 'glm-5.1'
-      ? 'glm'
-      : settings.provider === 'ollama'
-      ? 'ollama'
-      : isDirect
-      ? 'direct'
-      : 'ollama';
-
   return (
     <div className="mb-2">
       <label className="text-[10px] text-gray-400 mb-1 block">Engine</label>
-      <div className="grid grid-cols-3 gap-1.5">
+      <div className="grid grid-cols-2 gap-1.5">
         {ENGINES.map((e) => {
-          const selected = active === e.key;
+          const selected = settings.engine === e.key;
           return (
             <button
               key={e.key}
               onClick={() => {
-                // Direct: keep the current direct provider/model if already on a direct
-                // provider; otherwise drop to Gemini (the verified-working direct path).
-                if (e.key === 'direct' && isDirect) return;
-                onUpdateSettings({ ...settings, provider: e.provider, model: e.model });
+                if (settings.engine === e.key) return;
+                // Switch engine: pick a sensible default provider/model
+                // for the new engine so the dropdown isn't empty.
+                let newProvider: LLMProvider = settings.provider;
+                let newModel: string = settings.model;
+                if (e.key === 'oauth') {
+                  // Switch to ollama_cloud + free deepseek-v4-pro
+                  newProvider = 'ollama_cloud';
+                  newModel = 'deepseek-v4-pro:cloud';
+                } else {
+                  // Switch to anthropic + claude-sonnet-5
+                  newProvider = 'anthropic';
+                  newModel = 'claude-sonnet-5';
+                }
+                onUpdateSettings({
+                  ...settings,
+                  engine: e.key,
+                  provider: newProvider,
+                  model: newModel,
+                });
               }}
               className={`flex flex-col items-start px-2 py-1.5 rounded-lg border text-left transition-all ${
                 selected

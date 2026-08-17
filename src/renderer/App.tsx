@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import type { AppMode, ConversationEntry, UserContext, SettingsState } from './types';
 import type { LLMConfig, LLMProvider } from './services/llmService';
-import { streamLLM, streamLLMWithFallback, callLLM, PROVIDER_MODELS } from './services/llmService';
+import { streamLLM, streamLLMWithFallback, callLLM, PROVIDER_MODELS, normalizeProvider, isOAuthProvider, OAUTH_PROVIDERS, DIRECT_PROVIDERS, isVisionModel, getProvidersForEngine } from './services/llmService';
 import { audioService, type TranscriptionChunk } from './services/audioService';
 import { screenCaptureService } from './services/screenCaptureService';
 import OverlayHeader from './components/OverlayHeader';
@@ -11,17 +11,21 @@ import SetupPanel from './components/SetupPanel';
 import SettingsPanel from './components/SettingsPanel';
 
 const DEFAULT_SETTINGS: SettingsState = {
-  // Default = Anthropic Claude Sonnet 5 (per Ade 2026-08-06 11:18 MDT: "anthropic
-  // to be the default model and all others are fallbacks that automatically catch
-  // if anthropic fails"). Anthropic has $1000+ credit per the Seun-test briefing;
-  // Sonnet 5 is the "Fast" tier — sub-second first token, $5/$25 per 1M, good
-  // interview-quality answers. Fallback chain (in llmService.ts) automatically
-  // walks MiniMax-M3 → Ollama cloud deepseek-v4-pro if Anthropic errors.
-  // The Ollama / OpenClaw / MiniMax providers remain selectable in Settings.
+  // 2026-08-17 — default = Anthropic Claude Sonnet 5 (vision-capable,
+  // fast, $5/$25 per 1M, good interview answers). Sonnet 5 is the
+  // "Fast" tier — sub-second first token, vision-capable so it can
+  // also read LeetCode screenshots in Coding mode. Fallback chain
+  // (in llmService.ts) automatically walks qwen-vl-max → gpt-4o-mini
+  // → gemini-2.5-flash → MiniMax-M3 → qwen3.8-max → claude-sonnet-5
+  // → ollama cloud if Anthropic errors.
+  engine: 'direct',
+  visionProvider: 'qwen',
+  visionModel: 'qwen-vl-max',
   provider: 'anthropic',
   model: 'claude-sonnet-5',
   apiKeys: {},
   ollamaEndpoint: 'https://api.ollama.com',
+  ollamaLocalEndpoint: 'http://localhost:11434',
   customEndpoints: {},
   overlayOpacity: 0.92,
   fontSize: 14,
@@ -150,12 +154,32 @@ export default function App() {
         let storedProvider: LLMProvider =
           (stored.llmProvider as LLMProvider) || (DEFAULT_SETTINGS.provider as LLMProvider);
         let storedModel: string = stored.llmModel || DEFAULT_SETTINGS.model;
-        if (storedProvider === 'ollama' && storedModel === 'deepseek-v4-pro') {
-          console.log('[App] Migrating: ollama/deepseek-v4-pro → anthropic/claude-sonnet-5 (P0 default upgrade 2026-08-06)');
-          storedProvider = 'anthropic';
-          storedModel = 'claude-sonnet-5';
-          // Persist the migration so the upgrade is one-shot.
+
+        // 2026-08-17 — normalize legacy provider names into the new
+        // taxonomy. `gateway_ollama` and `openclaw` were internal
+        // routing abstractions and are no longer in the user-facing
+        // dropdown; remap them so old stored settings still work.
+        const beforeNorm = storedProvider;
+        storedProvider = normalizeProvider(storedProvider);
+        if (beforeNorm !== storedProvider) {
+          console.log(`[App] Migrating provider: ${beforeNorm} → ${storedProvider}`);
           api.setStore('llmProvider', storedProvider);
+        }
+
+        // 2026-08-17 — legacy migration: ollama/deepseek-v4-pro →
+        // anthropic/claude-sonnet-5 (per Ade 2026-08-06 11:18 MDT
+        // directive). The old `ollama` provider was renamed to
+        // `ollama_cloud`; this check runs BEFORE normalizeProvider so
+        // it catches the unnormalized value too. Skipped if the user
+        // explicitly kept the old default — only fires on the
+        // original untouched install.
+        if (((storedProvider as string) === 'ollama' || storedProvider === 'ollama_cloud') && storedModel === 'deepseek-v4-pro') {
+          // After the new ollama_cloud taxonomy, deepseek-v4-pro on
+          // the cloud needs the :cloud suffix. Don't migrate to
+          // anthropic; just add the suffix so the API doesn't 404.
+          // (The old migration was a default-upgrade; that was
+          // 2026-08-06, before ollama_cloud existed.)
+          storedModel = 'deepseek-v4-pro:cloud';
           api.setStore('llmModel', storedModel);
         }
 
@@ -174,13 +198,33 @@ export default function App() {
           // Force the production PAYG model name as the safe default.
           resolvedModel = 'qwen3.8-max';
         }
+        // 2026-08-17 — when migrating ollama → ollama_cloud, the bare
+        // `deepseek-v4-pro` (old catalog) needs the `:cloud` suffix
+        // (new catalog) or the API 404s.
+        if (storedProvider === 'ollama_cloud' && storedModel === 'deepseek-v4-pro') {
+          resolvedModel = 'deepseek-v4-pro:cloud';
+          api.setStore('llmModel', resolvedModel);
+        }
+
+        // 2026-08-17 — engine = oauth or direct. Default to direct so
+        // the user explicitly opts in to OAuth providers.
+        const storedEngine: 'oauth' | 'direct' = (() => {
+          if (stored.engine === 'oauth' || stored.engine === 'direct') return stored.engine;
+          // Infer from the legacy provider name
+          if (['ollama_cloud', 'ollama_local', 'openrouter', 'featherless'].includes(storedProvider)) return 'oauth';
+          return 'direct';
+        })();
 
         setSettings((prev) => ({
           ...prev,
+          engine: storedEngine,
           provider: storedProvider,
           model: resolvedModel,
+          visionProvider: normalizeProvider(stored.visionProvider || prev.visionProvider || 'qwen') as LLMProvider,
+          visionModel: stored.visionModel || prev.visionModel || 'qwen-vl-max',
           apiKeys: stored.apiKeys || prev.apiKeys,
           ollamaEndpoint: stored.ollamaEndpoint || prev.ollamaEndpoint,
+          ollamaLocalEndpoint: stored.ollamaLocalEndpoint || prev.ollamaLocalEndpoint,
           customEndpoints: stored.customEndpoints || prev.customEndpoints,
           overlayOpacity: stored.overlayOpacity ?? prev.overlayOpacity,
           fontSize: stored.fontSize ?? prev.fontSize,
@@ -201,19 +245,73 @@ export default function App() {
   }
 
   function getLLMConfig(): LLMConfig {
+    const provider = settings.provider;
+    let endpoint: string | undefined;
+    if (provider === 'ollama_local') {
+      endpoint = settings.ollamaLocalEndpoint || 'http://localhost:11434';
+    } else if (provider === 'ollama_cloud') {
+      endpoint = settings.customEndpoints['ollama_cloud'] || settings.ollamaEndpoint || 'https://api.ollama.com';
+    } else if (provider === 'qwen') {
+      endpoint = settings.customEndpoints['qwen'] || 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
+    } else {
+      endpoint = settings.customEndpoints[provider] || undefined;
+    }
     return {
-      provider: settings.provider,
+      provider,
       model: settings.model,
-      apiKey: settings.apiKeys[settings.provider] || '',
-      endpoint:
-        settings.provider === 'gateway_ollama' || settings.provider === 'featherless'
-          ? settings.customEndpoints['gateway'] || undefined // falls back to localhost:18789 in llmService
-          : settings.provider === 'ollama'
-          ? settings.ollamaEndpoint
-          : settings.customEndpoints[settings.provider] || undefined,
+      apiKey: settings.apiKeys[provider] || settings.apiKeys[normalizeProvider(provider)] || '',
+      endpoint,
       temperature: 0.3,
       maxTokens: 4096,
     };
+  }
+
+  // 2026-08-17 — vision model config for the screen-capture path. Used
+  // by analyzeScreenForCode (and, optionally, the solve step when the
+  // primary is a non-vision model). Returns the user's chosen vision
+  // config, or falls back to the primary if it happens to be vision-
+  // capable, or to the first available vision-capable model in the
+  // fallback chain.
+  function getVisionLLMConfig(): LLMConfig {
+    if (settings.visionProvider && settings.visionModel) {
+      // Build a config the same way getLLMConfig does
+      const provider = settings.visionProvider;
+      const apiKey = settings.apiKeys[provider] || settings.apiKeys[normalizeProvider(provider)] || '';
+      let endpoint: string | undefined;
+      if (provider === 'ollama_local') {
+        endpoint = settings.ollamaLocalEndpoint || 'http://localhost:11434';
+      } else if (provider === 'ollama_cloud') {
+        endpoint = settings.customEndpoints['ollama_cloud'] || settings.ollamaEndpoint || 'https://api.ollama.com';
+      } else if (provider === 'qwen') {
+        endpoint = settings.customEndpoints['qwen'] || 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
+      } else {
+        endpoint = settings.customEndpoints[provider] || undefined;
+      }
+      return {
+        provider,
+        model: settings.visionModel,
+        apiKey,
+        endpoint,
+        temperature: 0.2,
+        maxTokens: 2048,
+      };
+    }
+    // Fall back to the primary if it's vision-capable.
+    const primary = getLLMConfig();
+    if (isVisionModel(primary.provider, primary.model)) return primary;
+    // Fall back to qwen-vl-max (Token Plan) — usually has a key.
+    const qwenKey = settings.apiKeys['qwen'];
+    if (qwenKey) {
+      return {
+        provider: 'qwen',
+        model: 'qwen-vl-max',
+        apiKey: qwenKey,
+        endpoint: settings.customEndpoints['qwen'] || 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions',
+        temperature: 0.2,
+        maxTokens: 2048,
+      };
+    }
+    return primary;
   }
 
   // ── Interview Mode: Audio Transcription → AI Answer ──
@@ -269,8 +367,17 @@ export default function App() {
         }
       );
 
+      // 2026-08-17 P0 fix — capture the system audio in WHATEVER
+      // mode the user is currently in. The previous version called
+      // `setMode('interview')` here, which meant clicking the
+      // 🎤 Audio button in Coding mode would teleport the user back
+      // to Interview mode (where they didn't want to be — they were
+      // solving a LeetCode problem). Now the audio capture is
+      // mode-agnostic: the transcript buffer (`transcriptBuffer`)
+      // accumulates regardless of mode, and the Coding mode uses it
+      // as a snapshot at Capture time. Interview mode reads the same
+      // buffer for its own "Answer This" flow.
       setIsListening(true);
-      setMode('interview');
     } catch (e: any) {
       setError(`Audio capture failed: ${e.message}`);
       removeLevel();
@@ -449,8 +556,17 @@ RULES:
       // keeps the two calls consistent.
       const audioSnapshot = transcriptBuffer.current.trim();
 
-      // Step 1: Extract the coding problem from the screenshot
-      const problem = await screenCaptureService.analyzeScreenForCode(screenshot, getLLMConfig(), {
+      // Step 1: Extract the coding problem from the screenshot.
+      // 2026-08-17 — use the VISION config (cheap, fast) for the
+      // OCR read. Falls back to the primary if the primary is itself
+      // vision-capable. Falls back to qwen-vl-max if the primary is a
+      // non-vision model and the user has a qwen key. This is the
+      // "vision-then-reason" pattern Ade asked for: vision model reads
+      // the screen, reasoning model writes the solution.
+      const visionConfig = getVisionLLMConfig();
+      console.log(`[App] Coding: vision analyze via ${visionConfig.provider}/${visionConfig.model} (primary is ${settings.provider}/${settings.model})`);
+      (window as any).electronAPI?.logToMain?.('info', `[App] Coding analyze → ${visionConfig.provider}/${visionConfig.model}`);
+      const problem = await screenCaptureService.analyzeScreenForCode(screenshot, visionConfig, {
         jobDescription: userContext.jobDescription,
         programmingLanguage: userContext.programmingLanguage,
         audioTranscript: audioSnapshot || undefined,
@@ -459,6 +575,8 @@ RULES:
 
       // Step 2: Solve the problem (with the same audio snapshot so the
       // model also picks up any clarifications the interviewer said).
+      // Uses the PRIMARY config (typically the reasoning model).
+      (window as any).electronAPI?.logToMain?.('info', `[App] Coding solve → ${settings.provider}/${settings.model}`);
       const solution = await screenCaptureService.solveCodingProblem(problem, getLLMConfig(), {
         programmingLanguage: userContext.programmingLanguage,
         resumeContext: userContext.resumeText,
@@ -655,8 +773,12 @@ RULES:
               if (api) {
                 await api.setStore('llmProvider', newSettings.provider);
                 await api.setStore('llmModel', newSettings.model);
+                await api.setStore('engine', newSettings.engine);
+                await api.setStore('visionProvider', newSettings.visionProvider);
+                await api.setStore('visionModel', newSettings.visionModel);
                 await api.setStore('apiKeys', newSettings.apiKeys);
                 await api.setStore('ollamaEndpoint', newSettings.ollamaEndpoint);
+                await api.setStore('ollamaLocalEndpoint', newSettings.ollamaLocalEndpoint);
                 await api.setStore('customEndpoints', newSettings.customEndpoints);
                 await api.setStore('overlayOpacity', newSettings.overlayOpacity);
                 await api.setStore('fontSize', newSettings.fontSize);

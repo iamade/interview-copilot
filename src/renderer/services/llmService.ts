@@ -3,18 +3,51 @@
 // The main process makes the actual HTTP requests from Node.js (no CORS restrictions).
 
 export type LLMProvider =
-  | 'gateway_ollama'    // NEW default — routes through OpenClaw gateway → ollama/deepseek-v4-pro:cloud
-  | 'featherless'       // NEW alternative — routes through OpenClaw gateway → featherless tier
-  | 'anthropic'         // Claude (api.anthropic.com)
+  | 'ollama_cloud'      // 2026-08-17 — Ollama Cloud via OLLAMA_API_KEY (OAuth)
+  | 'ollama_local'      // 2026-08-17 — local Ollama daemon (no key needed; uses ollamaEndpoint)
+  | 'openrouter'        // 2026-08-17 — OpenRouter via OPENROUTER_API_KEY (OAuth)
+  | 'featherless'       // 2026-08-17 — Featherless via FEATHERLESSAI_OPENCLAW_KEYS (OAuth)
+  | 'anthropic'         // Claude (api.anthropic.com) — direct
   | 'minimax'           // MiniMax (api.minimax.io) — direct, OpenAI-compatible
-  | 'openai'
-  | 'gemini'
-  | 'ollama'
-  | 'openclaw'
-  | 'openrouter'
-  | 'glm'
-  | 'qwen'              // 2026-08-17 — Aliyun DashScope / Token Plan (OpenAI-compatible)
-  | 'custom';
+  | 'openai'            // direct
+  | 'gemini'            // direct
+  | 'qwen'              // 2026-08-17 — Aliyun DashScope / Token Plan — direct
+  | 'glm'               // direct
+  | 'kimi'              // direct
+  | 'piapi'             // direct
+  | 'custom';           // direct, user-configured endpoint
+
+// 2026-08-17 — engine classification. OAuth providers use
+// OpenClaw-managed keys (OLLAMA_API_KEY, OPENROUTER_API_KEY, etc.) and
+// hit the public providers' standard endpoints. Direct providers use
+// the provider's own API key and hit the provider's native endpoint.
+export const OAUTH_PROVIDERS: LLMProvider[] = ['ollama_cloud', 'ollama_local', 'openrouter', 'featherless'];
+export const DIRECT_PROVIDERS: LLMProvider[] = ['anthropic', 'minimax', 'openai', 'gemini', 'qwen', 'glm', 'kimi', 'piapi', 'custom'];
+
+export function isOAuthProvider(p: LLMProvider): boolean { return OAUTH_PROVIDERS.includes(p); }
+export function isDirectProvider(p: LLMProvider): boolean { return DIRECT_PROVIDERS.includes(p); }
+export function isVisionModel(p: LLMProvider, model: string): boolean {
+  // Cheap heuristic: vision-capable models. Used by Coding mode to
+  // pick a vision model for the screen-capture path. Doesn't have to
+  // be exhaustive — the user can override in settings.
+  const m = model.toLowerCase();
+  if (p === 'anthropic') return true; // all Claude 3+ are vision
+  if (p === 'openai') return /gpt-4o|vision|gpt-5/.test(m);
+  if (p === 'gemini') return /gemini-2|gemini-1\.5/.test(m);
+  if (p === 'qwen') return /vl|vision/.test(m);
+  if (p === 'ollama_cloud' || p === 'ollama_local') return /vl|vision|llava/.test(m);
+  if (p === 'openrouter') return /vision|vl|gpt-4o|claude|gemini/.test(m);
+  if (p === 'featherless') return /vl|vision/.test(m);
+  return false;
+}
+
+// Back-compat alias — the old `gateway_ollama` provider was an internal
+// routing abstraction; map it to the new user-facing `ollama_cloud`.
+export function normalizeProvider(p: LLMProvider | string): LLMProvider {
+  if (p === 'gateway_ollama') return 'ollama_cloud';
+  if (p === 'openclaw') return 'openrouter';
+  return p as LLMProvider;
+}
 
 // OpenClaw gateway (OpenAI-compatible) running locally on the Mac.
 export const OPENCLAW_GATEWAY_ENDPOINT = 'http://localhost:18789/v1/chat/completions';
@@ -52,82 +85,110 @@ export interface LLMResponse {
 
 // Provider model catalogs
 export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id: string; name: string }[] }> = {
-  gateway_ollama: {
-    label: 'Ollama Cloud + MiniMax (default · via OpenClaw)',
-    // All ids MUST carry the :cloud suffix — bare names route to a local Ollama daemon.
-    // MiniMax models use native MiniMax API (not Ollama relay).
+  // ── OAuth / Gateway providers (OpenClaw-managed keys) ──
+  ollama_cloud: {
+    label: 'Ollama Cloud',
+    // All ids MUST carry the :cloud suffix — bare names route to a
+    // local Ollama daemon (use ollama_local for that). Verified live
+    // on api.ollama.com with OLLAMA_API_KEY.
     models: [
-      { id: 'minimax/MiniMax-M3', name: 'MiniMax M3 (1M context · frontier)' },
-      { id: 'minimax/MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed (fast)' },
-      { id: 'minimax/MiniMax-M2.7', name: 'MiniMax M2.7 (reasoning)' },
-      { id: 'ollama/deepseek-v4-pro:cloud', name: 'DeepSeek V4 Pro (cloud)' },
-      { id: 'ollama/qwen3.5:397b-cloud', name: 'Qwen 3.5 397B (cloud)' },
-      { id: 'ollama/minimax-m3:cloud', name: 'MiniMax M3 (Ollama relay)' },
-      { id: 'ollama/kimi-k2.6:cloud', name: 'Kimi K2.6 (cloud)' },
+      { id: 'deepseek-v4-pro:cloud', name: 'DeepSeek V4 Pro (default · free)' },
+      { id: 'qwen3.5:397b-cloud', name: 'Qwen 3.5 397B (cloud)' },
+      { id: 'qwen-vl-max:cloud', name: 'Qwen VL Max (vision · for Coding mode)' },
+      { id: 'llama-3.3-70b:cloud', name: 'Llama 3.3 70B (cloud)' },
+      { id: 'kimi-k2.6:cloud', name: 'Kimi K2.6 (cloud)' },
+      { id: 'gpt-oss:120b-cloud', name: 'GPT-OSS 120B (cloud)' },
+    ],
+  },
+  ollama_local: {
+    label: 'Ollama Local',
+    // Local Ollama daemon (e.g. localhost:11434). No :cloud suffix.
+    // The list is the most common local models — `ollama list` on the
+    // user's machine may show different ones.
+    models: [
+      { id: 'llama3.1', name: 'Llama 3.1 (8B)' },
+      { id: 'llama3.2', name: 'Llama 3.2 (3B)' },
+      { id: 'mistral', name: 'Mistral 7B' },
+      { id: 'codellama', name: 'CodeLlama (13B)' },
+      { id: 'qwen2.5-coder', name: 'Qwen 2.5 Coder (7B)' },
+      { id: 'deepseek-coder-v2', name: 'DeepSeek Coder V2' },
+      { id: 'llava', name: 'LLaVA (vision · for Coding mode)' },
+    ],
+  },
+  openrouter: {
+    label: 'OpenRouter',
+    // Smart-routed multi-provider catalog. Vision-capable rows are
+    // tagged so the Coding-mode auto-pick can find them.
+    models: [
+      { id: 'auto', name: 'Auto (Smart Routing)' },
+      { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (vision)' },
+      { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6 (vision)' },
+      { id: 'openai/gpt-4o', name: 'GPT-4o (vision)' },
+      { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini (vision · cheap)' },
+      { id: 'google/gemini-2.5-flash', name: 'Gemini 2.5 Flash (vision · fast)' },
+      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro (vision)' },
+      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1 (reasoning)' },
+      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
     ],
   },
   featherless: {
-    label: 'Featherless (via OpenClaw)',
+    label: 'Featherless',
     models: [
       { id: 'featherless/zai-org/GLM-5.1-FP8', name: 'GLM 5.1 FP8' },
       { id: 'featherless/meta-llama/Llama-3.3-70B-Instruct', name: 'Llama 3.3 70B' },
     ],
   },
+
+  // ── Direct API providers (provider's own key) ──
   anthropic: {
     label: 'Anthropic (Claude)',
     models: [
-      { id: 'claude-fable-5', name: 'Claude Fable 5 (Frontier)' },
-      // Claude Opus 5 — released 2026-07-24, current flagship workhorse at $5/$25.
-      { id: 'claude-opus-5', name: 'Claude Opus 5 (Latest · 1M ctx · flagship)' },
-      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8' },
-      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7' },
-      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6' },
-      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5' },
-      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 (Fast)' },
-      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Fastest)' },
+      { id: 'claude-sonnet-5', name: 'Claude Sonnet 5 (Fast · vision)' },
+      { id: 'claude-opus-5', name: 'Claude Opus 5 (Latest · 1M ctx · flagship · vision)' },
+      { id: 'claude-opus-4-8', name: 'Claude Opus 4.8 (vision)' },
+      { id: 'claude-opus-4-7', name: 'Claude Opus 4.7 (vision)' },
+      { id: 'claude-opus-4-6', name: 'Claude Opus 4.6 (vision)' },
+      { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5 (vision)' },
+      { id: 'claude-sonnet-4-6', name: 'Claude Sonnet 4.6 (vision)' },
+      { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5 (Fastest · vision)' },
     ],
   },
   minimax: {
-    label: 'MiniMax (direct · OpenAI-compatible)',
-    // Direct hits to api.minimax.io — no gateway needed.
-    // MiniMax-M3 is the frontier 1M-context model; M2.7-highspeed is the fast tier.
+    label: 'MiniMax',
+    // Direct hits to api.minimax.io — no gateway needed. <think> tags
+    // are stripped in-flight.
     models: [
       { id: 'MiniMax-M3', name: 'MiniMax M3 (1M context · frontier)' },
       { id: 'MiniMax-M2.7-highspeed', name: 'MiniMax M2.7 Highspeed' },
       { id: 'MiniMax-M2.7', name: 'MiniMax M2.7 (reasoning)' },
       { id: 'MiniMax-M2.1-highspeed', name: 'MiniMax M2.1 Highspeed' },
       { id: 'MiniMax-M2.1', name: 'MiniMax M2.1' },
-      { id: 'MiniMax-M2', name: 'MiniMax M2' },
     ],
   },
   openai: {
     label: 'OpenAI',
     models: [
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini (vision · cheap)' },
+      { id: 'gpt-4o', name: 'GPT-4o (vision)' },
       { id: 'gpt-5.4', name: 'GPT-5.4 Codex (Latest)' },
-      { id: 'gpt-4o', name: 'GPT-4o' },
-      { id: 'gpt-4o-mini', name: 'GPT-4o Mini' },
       { id: 'o3', name: 'o3 (Reasoning)' },
     ],
   },
   gemini: {
     label: 'Google Gemini',
     models: [
-      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+      { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash (vision · fast)' },
+      { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro (vision)' },
     ],
   },
-  ollama: {
-    label: 'Ollama Cloud (free · deepseek-v4-pro)',
-    // Verified live on api.ollama.com with the key seeded from .env.
+  qwen: {
+    label: 'Qwen (Aliyun Token Plan)',
+    // OpenAI-compatible at token-plan.ap-southeast-1.maas.aliyuncs.com.
+    // Auth: Bearer with the sk-sp-... key.
     models: [
-      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro (default)' },
-      { id: 'glm-5.1', name: 'GLM 5.1' },
-      { id: 'glm-5', name: 'GLM 5' },
-      { id: 'gpt-oss:120b', name: 'GPT-OSS 120B' },
-      { id: 'qwen3.5:397b', name: 'Qwen 3.5 397B' },
-      { id: 'kimi-k2.6', name: 'Kimi K2.6' },
-      { id: 'deepseek-v3.2', name: 'DeepSeek V3.2' },
+      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (PAYG · frontier)' },
+      { id: 'qwen-vl-max', name: 'Qwen VL Max (vision · for Coding mode)' },
+      { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus' },
     ],
   },
   glm: {
@@ -137,42 +198,16 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
       { id: 'glm-4-plus', name: 'GLM 4 Plus' },
     ],
   },
-  openclaw: {
-    label: 'OpenClaw (via OpenRouter)',
+  kimi: {
+    label: 'Kimi (Moonshot)',
     models: [
-      { id: 'auto', name: 'OpenRouter Auto (Smart Routing)' },
-      { id: 'openrouter/hunter-alpha', name: 'Hunter Alpha (Reasoning)' },
-      { id: 'openrouter/healer-alpha', name: 'Healer Alpha (Vision)' },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6' },
     ],
   },
-  openrouter: {
-    label: 'OpenRouter',
+  piapi: {
+    label: 'PiAPI',
     models: [
-      { id: 'auto', name: 'Auto (Smart Routing)' },
-      { id: 'anthropic/claude-opus-4-6', name: 'Claude Opus 4.6' },
-      { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
-      { id: 'openai/gpt-4o', name: 'GPT-4o' },
-      { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
-      { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
-      { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
-    ],
-  },
-  // 2026-08-17 — Aliyun DashScope / Token Plan. OpenAI-compatible API at
-  // https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1.
-  // Auth: Bearer with the `sk-sp-...` key from .env (QWEN_API_KEY or
-  // DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY — same key). The qwen3.8-max model
-  // id is the production PAYG model; qwen3-max and qwen3-coder-plus are
-  // NOT valid here. Ade's stored settings had `provider: 'qwen'` with
-  // `model: 'qwen3.8-max'` from before this provider existed in the
-  // service, so the callLLM switch threw "Unsupported provider: qwen" —
-  // see migration in App.tsx and the new case in callLLM.
-  qwen: {
-    label: 'Qwen (Aliyun Token Plan)',
-    models: [
-      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (PAYG · frontier)' },
-      { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus' },
-      { id: 'qwen3-coder-plus', name: 'Qwen 3 Coder Plus (note: NOT on Token Plan endpoint)' },
-      { id: 'qwen-vl-max', name: 'Qwen VL Max (vision · Token Plan)' },
+      { id: 'gpt-4o-mini', name: 'GPT-4o Mini (PAYG · last resort)' },
     ],
   },
   custom: {
@@ -182,6 +217,17 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
     ],
   },
 };
+
+// 2026-08-17 — engine-scoped provider/model helpers. Used by the
+// Settings panel to filter the dropdown to the providers reachable
+// with the current auth method.
+export function getProvidersForEngine(engine: 'oauth' | 'direct'): LLMProvider[] {
+  return engine === 'oauth' ? OAUTH_PROVIDERS : DIRECT_PROVIDERS;
+}
+
+export function getProviderLabel(p: LLMProvider): string {
+  return PROVIDER_MODELS[p]?.label || p;
+}
 
 // ── CORS-free fetch ──
 // Routes through Electron main process IPC to bypass browser CORS restrictions.
@@ -420,9 +466,11 @@ async function callOllama(messages: Message[], config: LLMConfig): Promise<LLMRe
   });
 
   if (data.error) throw new Error(`Ollama: ${data.error}`);
+  // 2026-08-17 — use the actual config.provider so the legacy 'ollama'
+  // and the new 'ollama_cloud' / 'ollama_local' all report correctly.
   return {
     text: data.message?.content || '',
-    provider: 'ollama',
+    provider: (config.provider === 'ollama_local' ? 'ollama_local' : 'ollama_cloud') as any,
     model: config.model,
     tokensUsed: data.eval_count,
   };
@@ -658,7 +706,7 @@ async function callOpenClaw(messages: Message[], config: LLMConfig): Promise<LLM
 
   return {
     text: data.choices?.[0]?.message?.content || '',
-    provider: 'openclaw',
+    provider: 'openrouter' as any,
     model: config.model,
     tokensUsed: data.usage?.completion_tokens,
   };
@@ -736,7 +784,19 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
   const logToMain = (window as any).electronAPI?.logToMain;
   logToMain?.('info', `[LLM] call ${config.provider}/${config.model} (${messages.length} msgs)`);
   switch (config.provider) {
-    case 'gateway_ollama':
+    // 2026-08-17 — providers reorganized into OAuth/Gateway and Direct
+    // API buckets. The old `gateway_ollama` and `openclaw` keys were
+    // internal routing abstractions and are no longer in the user-
+    // facing dropdown (see OAUTH_PROVIDERS / DIRECT_PROVIDERS).
+    case 'ollama_cloud':
+      // Reuse callOllama — it already supports the :cloud model ids.
+      return callOllama(messages, { ...config, endpoint: config.endpoint || 'https://api.ollama.com' });
+    case 'ollama_local':
+      // Local Ollama daemon. No key needed; uses ollamaEndpoint from
+      // settings. Strip any :cloud suffix (a common copy-paste error).
+      return callOllama(messages, { ...config, endpoint: config.endpoint || 'http://localhost:11434' });
+    case 'openrouter':
+      return callOpenRouter(messages, config);
     case 'featherless':
       return callGateway(messages, config);
     case 'anthropic':
@@ -747,19 +807,36 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
       return callOpenAI(messages, config);
     case 'gemini':
       return callGemini(messages, config);
-    case 'ollama':
-      return callOllama(messages, config);
-    case 'glm':
-      return callGLM(messages, config);
-    case 'openclaw':
-      return callOpenClaw(messages, config);
-    case 'openrouter':
-      return callOpenRouter(messages, config);
     case 'qwen':
       return callQwen(messages, config);
+    case 'glm':
+      return callGLM(messages, config);
+    case 'kimi':
+      // Kimi uses an OpenAI-compatible endpoint at api.kimi.com.
+      return callOpenAI(messages, {
+        ...config,
+        endpoint: config.endpoint || 'https://api.kimi.com/coding/v1/chat/completions',
+      });
+    case 'piapi':
+      // PiAPI exposes gpt-4o-mini via an OpenAI-compatible endpoint.
+      return callOpenAI(messages, {
+        ...config,
+        endpoint: config.endpoint || 'https://api.piapi.ai/api/v1/chat/completions',
+      });
     case 'custom':
       return callCustomEndpoint(messages, config);
+    // Back-compat: legacy providers (any string the user has stored
+    // that isn't in the new taxonomy). The string cast is required
+    // because TS narrows the union — runtime checks are fine.
     default: {
+      // Legacy → new mapping
+      const legacy = (config.provider as string) || '';
+      if (legacy === 'gateway_ollama' || legacy === 'ollama') {
+        return callOllama(messages, { ...config, endpoint: config.endpoint || 'https://api.ollama.com' });
+      }
+      if (legacy === 'openclaw') {
+        return callOpenRouter(messages, config);
+      }
       const err = new Error(`Unsupported provider: ${config.provider}`);
       logToMain?.('error', `[LLM] ${err.message}`);
       throw err;
@@ -907,19 +984,29 @@ export interface FallbackStep {
   model: string;
   /** Provider key in apiKeys whose presence enables this fallback. Use
    *  'ollama' which is free and doesn't need a real key. */
-  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'qwen' | 'none';
+  needsKey: 'minimax' | 'ollama' | 'ollama_cloud' | 'ollama_local' | 'openrouter' | 'featherless' | 'anthropic' | 'openai' | 'gemini' | 'qwen' | 'glm' | 'kimi' | 'piapi' | 'none';
   /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. */
   endpoint?: string;
 }
 
 export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
-  // 2026-08-17 P0 fix — added Qwen 3.8 Max as the 2nd step so the
-  // fallback chain has a cheap vision-capable model before reaching the
-  // free Ollama tier. Order: MiniMax M3 (frontier) → Qwen 3.8 Max
-  // (PAYG, vision-capable, also handles screen capture) → Ollama free.
+  // 2026-08-17 P0 fix — wider ladder so ANY single-model failure
+  // catches via the next. Order is cheapest/fastest-first within each
+  // tier, then the free tier at the bottom. The Coding mode's screen
+  // capture path uses a vision-capable model (qwen-vl-max or
+  // gpt-4o-mini) so the vision read doesn't fail when the primary
+  // happens to be a non-vision model.
+  //
+  // Tier 1 — cheap vision (Coding mode):
+  { provider: 'qwen', model: 'qwen-vl-max', needsKey: 'qwen', endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions' },
+  { provider: 'openai', model: 'gpt-4o-mini', needsKey: 'openai' },
+  { provider: 'gemini', model: 'gemini-2.5-flash', needsKey: 'gemini' },
+  // Tier 2 — frontier reasoning (Interview mode / solve step):
   { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
   { provider: 'qwen', model: 'qwen3.8-max', needsKey: 'qwen', endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions' },
-  { provider: 'ollama', model: 'deepseek-v4-pro', needsKey: 'none', endpoint: 'https://api.ollama.com' },
+  { provider: 'anthropic', model: 'claude-sonnet-5', needsKey: 'anthropic' },
+  // Tier 3 — free:
+  { provider: 'ollama_cloud', model: 'deepseek-v4-pro:cloud', needsKey: 'none', endpoint: 'https://api.ollama.com' },
 ];
 
 /**
@@ -943,21 +1030,32 @@ export async function callLLMWithFallback(
     console.warn(`[LLM] Primary ${primaryConfig.provider}/${primaryConfig.model} failed: ${primaryMsg}. Trying fallback chain.`);
 
     for (const step of fallbackChain) {
-      // Skip if a required key is missing
+      // Skip if a required key is missing. Also look up under legacy
+      // aliases (openclaw → openrouter, ollama → ollama_cloud) so
+      // installs with old stored keys still work.
       if (step.needsKey !== 'none') {
-        const key = apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '');
+        const key = apiKeys[step.needsKey]
+          || (step.needsKey === 'openrouter' ? apiKeys['openclaw'] : '')
+          || (step.needsKey === 'ollama_cloud' ? apiKeys['ollama'] : '');
         if (!key) {
           console.log(`[LLM] Skipping fallback ${step.provider}/${step.model} — no API key for ${step.needsKey}`);
           continue;
         }
       }
-      // Don't retry on the same provider/model as the primary
-      if (step.provider === primaryConfig.provider && step.model === primaryConfig.model) continue;
+      // Don't retry on the same provider/model as the primary (and
+      // account for legacy provider aliases).
+      const primaryNorm = normalizeProvider(primaryConfig.provider);
+      const stepNorm = normalizeProvider(step.provider);
+      if (stepNorm === primaryNorm && step.model === primaryConfig.model) continue;
 
       const fallbackConfig: LLMConfig = {
         provider: step.provider,
         model: step.model,
-        apiKey: step.needsKey === 'none' ? '' : (apiKeys[step.needsKey] || (step.needsKey === 'gateway' ? apiKeys['openclaw'] : '')),
+        apiKey: step.needsKey === 'none'
+          ? ''
+          : (apiKeys[step.needsKey]
+              || (step.needsKey === 'openrouter' ? apiKeys['openclaw'] : '')
+              || (step.needsKey === 'ollama_cloud' ? apiKeys['ollama'] : '')),
         endpoint: step.endpoint || customEndpoints[step.provider] || undefined,
         temperature: primaryConfig.temperature,
         maxTokens: primaryConfig.maxTokens,

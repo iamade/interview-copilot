@@ -404,8 +404,59 @@ ipcMain.handle('fetch:proxy', async (_event, url: string, options: {
       // For streaming responses, read the full text and return it
       const text = await response.text();
       return { ok: response.ok, status: response.status, data: text, streaming: true };
+    }
+
+    // 2026-08-17 P0 fix — handle non-JSON / empty / truncated responses
+    // without throwing "Unexpected end of JSON input" all the way to the
+    // renderer. We:
+    //   1. Read the body as text FIRST (always works, even on empty)
+    //   2. If response.ok, attempt JSON.parse on the text
+    //   3. If parse fails on a 2xx (rare — server says OK but sent
+    //      garbage), wrap the raw text in `{raw: ...}` so the renderer
+    //      can at least display something useful
+    //   4. If response is NOT ok (4xx/5xx), wrap the raw text in
+    //      `{error: {message, raw}}` so the renderer shows the actual
+    //      API error message (e.g. "Qwen 401 unauthorized") instead
+    //      of a vague JSON parse error.
+    const rawText = await response.text();
+
+    if (!rawText || rawText.trim() === '') {
+      // Empty body — common on 401/403/204.
+      if (response.ok) {
+        return { ok: true, status: response.status, data: { raw: '' } };
+      }
+      return {
+        ok: false,
+        status: response.status,
+        data: { error: { message: `HTTP ${response.status} ${response.statusText || ''} (empty body)`.trim(), raw: '' } },
+      };
+    }
+
+    if (response.ok) {
+      try {
+        data = JSON.parse(rawText);
+      } catch (parseErr: any) {
+        // Server said OK but sent non-JSON. Wrap the raw text so the
+        // caller can at least display it.
+        data = { raw: rawText, parseError: parseErr.message };
+      }
     } else {
-      data = await response.json();
+      // Try to parse the error body as JSON; fall back to wrapping
+      // the raw text so the user sees the real API error message
+      // (Qwen/Anthropic/OpenAI all return JSON error bodies, but
+      // some intermediaries return plain text).
+      let errBody: any;
+      try {
+        errBody = JSON.parse(rawText);
+      } catch {
+        errBody = { error: { message: rawText.slice(0, 500) } };
+      }
+      // Make sure the error shape has a message.
+      if (!errBody.error) errBody = { error: { message: rawText.slice(0, 500) } };
+      if (!errBody.error.message) errBody.error.message = `HTTP ${response.status}`;
+      errBody.error.raw = rawText.slice(0, 2000);
+      errBody.error.status = response.status;
+      data = errBody;
     }
 
     return { ok: response.ok, status: response.status, data };
