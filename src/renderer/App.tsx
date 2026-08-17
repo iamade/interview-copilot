@@ -70,6 +70,70 @@ export default function App() {
     loadSettings();
   }, []);
 
+  // 2026-08-17 P0 fix — click-through overlay hover toggle. The main
+  // process defaults the window to `setIgnoreMouseEvents(true, {
+  // forward: true })` so the overlay does NOT block clicks on the
+  // browser / LeetCode / VS Code / etc. behind it. We flip the window
+  // to click-capture ONLY when the cursor is over an interactive
+  // element (button, input, select, etc.), and back to pass-through
+  // everywhere else. This way the user can click through the overlay
+  // onto the LeetCode UI beneath, but can still click the overlay's
+  // own buttons.
+  //
+  // Edge cases:
+  // - Text selection: the user can still drag-select text in the
+  //   solution / transcript by holding click and dragging — the
+  //   browser fires mousedown on the wrapper which is captured via
+  //   `[data-overlay-ui]`.
+  // - Drag-region: the header has -webkit-app-region: drag, which the
+  //   OS handles directly regardless of setIgnoreMouseEvents.
+  // - Move the window: when the user clicks-and-drags on the
+  //   drag-region header, the OS moves the window. The mousemove
+  //   handler is throttled so it doesn't fight the OS.
+  useEffect(() => {
+    const api = (window as any).electronAPI;
+    if (!api?.setClickThrough) return;
+
+    const isInteractive = (el: EventTarget | null): boolean => {
+      if (!(el instanceof Element)) return false;
+      // Match the same selectors the app uses for "real" UI:
+      // buttons, form controls, links, drag-region header items,
+      // anything explicitly marked .no-drag / .interactive, and the
+      // visible UI region (so the user can select text and click
+      // dropdowns).
+      return !!el.closest(
+        'button, input, select, textarea, a[href], [role="button"], .no-drag, .interactive, [data-overlay-ui]'
+      );
+    };
+
+    let lastIgnore = true;
+    const handleMove = (e: MouseEvent) => {
+      const shouldIgnore = !isInteractive(e.target);
+      if (shouldIgnore !== lastIgnore) {
+        lastIgnore = shouldIgnore;
+        api.setClickThrough(shouldIgnore);
+      }
+    };
+
+    // Throttle to one call per ~60ms — mousemove fires very often and
+    // we only need ~16Hz updates on a binary toggle.
+    let last = 0;
+    const throttled = (e: MouseEvent) => {
+      const now = Date.now();
+      if (now - last < 60) return;
+      last = now;
+      handleMove(e);
+    };
+
+    document.addEventListener('mousemove', throttled);
+    return () => {
+      document.removeEventListener('mousemove', throttled);
+      // Restore pass-through on unmount so the app doesn't leave the
+      // window stuck in click-capture mode.
+      api.setClickThrough?.(true);
+    };
+  }, []);
+
   async function loadSettings() {
     try {
       const api = window.electronAPI;
@@ -98,9 +162,18 @@ export default function App() {
         // Migration: if the stored model no longer exists in the catalog
         // (e.g. 'claude-opus-5' was renamed to 'claude-opus-4-5-20251101'),
         // fall back to the first model for that provider so the app keeps working.
+        // 2026-08-17 P0 fix — also handle the qwen case: if the stored
+        // model is `qwen3-max` (an old name) or anything not in the
+        // qwen catalog, fall back to `qwen3.8-max` (the production PAYG
+        // model on the Token Plan endpoint). Without this, the LLM
+        // service would 400 because qwen3-max doesn't exist on Token Plan.
         const validModels = PROVIDER_MODELS[storedProvider]?.models || [];
         const isValidModel = validModels.some((m) => m.id === storedModel);
-        const resolvedModel = isValidModel ? storedModel : validModels[0]?.id || storedModel;
+        let resolvedModel = isValidModel ? storedModel : validModels[0]?.id || storedModel;
+        if (storedProvider === 'qwen' && !isValidModel) {
+          // Force the production PAYG model name as the safe default.
+          resolvedModel = 'qwen3.8-max';
+        }
 
         setSettings((prev) => ({
           ...prev,
@@ -431,6 +504,7 @@ RULES:
   if (stealthMode) {
     return (
       <div
+        data-overlay-ui
         className="w-full h-full flex items-center justify-center cursor-pointer group"
         onClick={() => setStealthMode(false)}
         title="Click to show overlay"
@@ -447,7 +521,7 @@ RULES:
 
   if (isMinimized) {
     return (
-      <div className="w-full h-full flex items-center justify-center">
+      <div data-overlay-ui className="w-full h-full flex items-center justify-center">
         <div
           className="bg-gray-900/95 backdrop-blur-xl rounded-full px-4 py-2 flex items-center gap-2 cursor-pointer border border-purple-500/40 hover:border-purple-400 transition-all shadow-2xl hover:scale-105"
           onClick={() => setIsMinimized(false)}
@@ -464,7 +538,10 @@ RULES:
   }
 
   return (
-    <div className="w-full h-full flex flex-col bg-gray-950/[0.92] backdrop-blur-xl rounded-2xl border border-gray-800/60 shadow-2xl overflow-hidden">
+    <div
+      data-overlay-ui
+      className="w-full h-full flex flex-col bg-gray-950/[0.92] backdrop-blur-xl rounded-2xl border border-gray-800/60 shadow-2xl overflow-hidden"
+    >
       <OverlayHeader
         mode={mode}
         isListening={isListening}

@@ -52,4 +52,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('fetch:stream-done', handler);
     return () => ipcRenderer.removeListener('fetch:stream-done', handler);
   },
+
+  // 2026-08-17 P0 fix — IPC bridge for renderer-side code (LLM service,
+  // screen capture, etc.) to push structured log messages into the
+  // main-process terminal. Without this, the only place an LLM error
+  // like "Qwen 401" shows up is in the overlay UI's red banner — the
+  // terminal stays empty and debugging from `npm start` is impossible.
+  logToMain: (level: 'info' | 'warn' | 'error' | 'log', message: string, meta?: any) =>
+    ipcRenderer.invoke('log:toMain', level, message, meta),
 });

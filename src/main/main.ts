@@ -203,6 +203,14 @@ function loadEnvKeys() {
     OLLAMA_API_KEY: 'ollama',
     OPENCLAW_API_KEY: 'openclaw',
     OPENROUTER_API_KEY: 'openrouter',
+    // 2026-08-17 P0 fix — Qwen (Aliyun DashScope / Token Plan). The
+    // .env has both `QWEN_API_KEY` and the older `DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY`
+    // (which is the same key under a different name); the QWEN_API_KEY
+    // takes precedence. We also pick up ZAI_API_KEY for the GLM column
+    // (the .env file uses both names depending on which agent wrote it).
+    QWEN_API_KEY: 'qwen',
+    DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY: 'qwen',
+    ZAI_API_KEY: 'glm',
   };
 
   let updated = false;
@@ -210,15 +218,27 @@ function loadEnvKeys() {
     const val = envVars[envKey];
     // Always prefer .env value over missing/empty store value
     if (val && !val.startsWith('your-')) {
-      if (currentKeys[storeKey] !== val) {
+      // Don't overwrite a real key with an empty one
+      if (!currentKeys[storeKey] || currentKeys[storeKey] !== val) {
         currentKeys[storeKey] = val;
         updated = true;
       }
     }
   }
 
+  // Also map the Qwen OpenAI-compatible endpoint so the renderer can
+  // find it without re-parsing the .env.
+  const customEndpoints: Record<string, string> = store.get('customEndpoints') || {};
+  if (envVars['QWEN_OPENAI_COMPATIBLE_URL'] && customEndpoints['qwen'] !== envVars['QWEN_OPENAI_COMPATIBLE_URL']) {
+    customEndpoints['qwen'] = envVars['QWEN_OPENAI_COMPATIBLE_URL'].endsWith('/chat/completions')
+      ? envVars['QWEN_OPENAI_COMPATIBLE_URL']
+      : envVars['QWEN_OPENAI_COMPATIBLE_URL'].replace(/\/$/, '') + '/chat/completions';
+    updated = true;
+  }
+
   if (updated) {
     store.set('apiKeys', currentKeys);
+    store.set('customEndpoints', customEndpoints);
     console.log('[Main] Loaded API keys from .env into store');
   }
 
@@ -268,14 +288,46 @@ function createOverlayWindow() {
   overlayWindow.setAlwaysOnTop(true, 'floating', 1);
   overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
 
-  // Make clicks pass through when not hovering over content
-  overlayWindow.setIgnoreMouseEvents(false);
+  // 2026-08-17 P0 fix — default to click-through so the overlay does
+  // NOT block clicks on the browser / LeetCode / VS Code / etc. behind
+  // it. The renderer (App.tsx) flips this OFF when the cursor enters
+  // the visible UI region via `mouseenter`, and back ON when the cursor
+  // leaves. Without this, the entire overlay window rectangle
+  // intercepts mouse events on whatever is underneath (e.g. the user
+  // can't click anything in LeetCode that's covered by the overlay).
+  // Note: `forward: true` is required so the renderer can still
+  // receive mouseenter/mouseleave to do the hover-toggle. Without
+  // forward, those events would never reach the web page.
+  overlayWindow.setIgnoreMouseEvents(true, { forward: true });
 
   if (process.env.NODE_ENV === 'development') {
     overlayWindow.loadURL('http://localhost:5173/');
   } else {
     overlayWindow.loadFile(path.join(__dirname, '../renderer/index.html'));
   }
+
+  // 2026-08-17 P0 fix — forward renderer console messages to the main
+  // process terminal so failures like "Unsupported provider: qwen" or
+  // "Failed to capture screenshot" actually show up in the `npm start`
+  // output instead of being swallowed by the renderer. Without this,
+  // the user sees a red error banner in the overlay UI but the
+  // terminal shows no error — which makes debugging impossible.
+  // Filter out the noisy Tailwind CDN warning (we know about it) but
+  // keep everything else.
+  overlayWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    // level: 0=verbose, 1=info, 2=warning, 3=error
+    const prefix = level === 3 ? '[Renderer ERROR]' : level === 2 ? '[Renderer WARN]' : '[Renderer]';
+    const src = sourceId ? ` (${sourceId.split('/').pop()}:${line})` : '';
+    console.log(`${prefix} ${message}${src}`);
+  });
+
+  // 2026-08-17 P0 fix — surface any uncaught renderer exceptions to the
+  // terminal too. Without this, a thrown React error would crash the
+  // overlay silently and the user would have to open DevTools to see
+  // what happened.
+  overlayWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[Main] Renderer process gone:', details);
+  });
 
   overlayWindow.on('moved', () => {
     if (overlayWindow) {
@@ -472,6 +524,27 @@ ipcMain.handle('window:toggleOverlay', () => {
 ipcMain.handle('window:setClickThrough', (_event, enable: boolean) => {
   if (overlayWindow) {
     overlayWindow.setIgnoreMouseEvents(enable, { forward: true });
+  }
+});
+
+// 2026-08-17 P0 fix — IPC bridge for renderer-side code (e.g. the LLM
+// service) to push structured log messages into the main-process
+// terminal. Without this, the only place an LLM error like "Qwen 401"
+// would show up is in the overlay UI's red banner; the terminal would
+// stay empty and debugging from `npm start` logs is impossible.
+ipcMain.handle('log:toMain', (_event, level: string, message: string, meta?: any) => {
+  const ts = new Date().toISOString().slice(11, 23);
+  const tag =
+    level === 'error' ? '[Renderer ERROR]' :
+    level === 'warn' ? '[Renderer WARN]' :
+    level === 'info' ? '[Renderer INFO]' :
+    '[Renderer LOG]';
+  const metaStr = meta ? ` ${JSON.stringify(meta)}` : '';
+  // Route error/warn to stderr, info/log to stdout (matches Node convention).
+  if (level === 'error' || level === 'warn') {
+    console.error(`${ts} ${tag} ${message}${metaStr}`);
+  } else {
+    console.log(`${ts} ${tag} ${message}${metaStr}`);
   }
 });
 

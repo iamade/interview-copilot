@@ -13,6 +13,7 @@ export type LLMProvider =
   | 'openclaw'
   | 'openrouter'
   | 'glm'
+  | 'qwen'              // 2026-08-17 — Aliyun DashScope / Token Plan (OpenAI-compatible)
   | 'custom';
 
 // OpenClaw gateway (OpenAI-compatible) running locally on the Mac.
@@ -154,6 +155,24 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
       { id: 'google/gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
       { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1' },
       { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B' },
+    ],
+  },
+  // 2026-08-17 — Aliyun DashScope / Token Plan. OpenAI-compatible API at
+  // https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1.
+  // Auth: Bearer with the `sk-sp-...` key from .env (QWEN_API_KEY or
+  // DIRECT_QWEN_MAC_VPS_OPENCLAW_KEY — same key). The qwen3.8-max model
+  // id is the production PAYG model; qwen3-max and qwen3-coder-plus are
+  // NOT valid here. Ade's stored settings had `provider: 'qwen'` with
+  // `model: 'qwen3.8-max'` from before this provider existed in the
+  // service, so the callLLM switch threw "Unsupported provider: qwen" —
+  // see migration in App.tsx and the new case in callLLM.
+  qwen: {
+    label: 'Qwen (Aliyun Token Plan)',
+    models: [
+      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (PAYG · frontier)' },
+      { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus' },
+      { id: 'qwen3-coder-plus', name: 'Qwen 3 Coder Plus (note: NOT on Token Plan endpoint)' },
+      { id: 'qwen-vl-max', name: 'Qwen VL Max (vision · Token Plan)' },
     ],
   },
   custom: {
@@ -440,6 +459,75 @@ async function callGLM(messages: Message[], config: LLMConfig): Promise<LLMRespo
   };
 }
 
+// ── Qwen (Aliyun DashScope / Token Plan) ──
+// 2026-08-17 P0 fix — added so Ade's stored `provider: 'qwen'` settings
+// don't blow up with "Unsupported provider: qwen". The Token Plan
+// endpoint is OpenAI-compatible and uses Bearer auth with the `sk-sp-…`
+// key. Note: `qwen3-coder-plus` is NOT a Token-Plan model (it's on the
+// regular DashScope inference endpoint) — it's listed in the catalog
+// for reference but will 404 if selected. The qwen-vl-max vision model
+// accepts images via the same OpenAI-compatible `image_url` content
+// part used by the screen-capture path, so it can OCR LeetCode
+// questions.
+async function callQwen(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  const endpoint = config.endpoint || 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions';
+
+  if (!config.apiKey) {
+    throw new Error('Qwen: API key is required (set QWEN_API_KEY in .env, or paste it in Settings → API Keys → Qwen)');
+  }
+
+  // Token Plan accepts the OpenAI-style content part array. We map
+  // `image_url` to a Qwen-VL-compatible image part and pass `text` and
+  // multimodal messages through as-is.
+  const data = await corsFetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${config.apiKey}`,
+    },
+    body: JSON.stringify({
+      model: config.model,
+      messages: messages.map((m) => {
+        if (typeof m.content === 'string') {
+          return { role: m.role, content: m.content };
+        }
+        return {
+          role: m.role,
+          content: (m.content as ContentPart[]).map((part) => {
+            if (part.type === 'text') return { type: 'text' as const, text: part.text || '' };
+            if (part.type === 'image_url') return { type: 'image_url' as const, image_url: part.image_url };
+            return { type: 'text' as const, text: '' };
+          }),
+        };
+      }),
+      max_tokens: config.maxTokens || 4096,
+      temperature: config.temperature ?? 0.3,
+    }),
+  });
+
+  if (data.error) {
+    const code = data.error.code || '';
+    const msg = data.error.message || JSON.stringify(data.error);
+    const err = new Error(`Qwen${code ? ` [${code}]` : ''}: ${msg}`);
+    (window as any).electronAPI?.logToMain?.('error', `[LLM] Qwen ${config.model} failed: ${err.message}`);
+    throw err;
+  }
+
+  // Qwen sometimes returns `data.choices[0].message` as a string (rare
+  // but seen on vl-max). Normalize to a string.
+  const choice = data.choices?.[0]?.message;
+  const text = typeof choice === 'string' ? choice : choice?.content || '';
+
+  (window as any).electronAPI?.logToMain?.('info', `[LLM] Qwen ${config.model} OK (${text.length} chars)`);
+
+  return {
+    text,
+    provider: 'qwen',
+    model: config.model,
+    tokensUsed: data.usage?.completion_tokens,
+  };
+}
+
 // ── MiniMax (direct, OpenAI-compatible) ──
 // Hits api.minimax.io/v1/chat/completions. MiniMax models (M3, M2.7, M2.x) include
 // <think>…</think> blocks in the response by default — strip them so the
@@ -641,6 +729,12 @@ async function callCustomEndpoint(messages: Message[], config: LLMConfig): Promi
 
 // ── Main dispatch ──
 export async function callLLM(messages: Message[], config: LLMConfig): Promise<LLMResponse> {
+  // 2026-08-17 P0 fix — log the call attempt to the main-process
+  // terminal so `npm start` shows what's being sent. Without this, an
+  // LLM error like "Unsupported provider: qwen" only shows up in the
+  // overlay UI's red banner and is invisible from the terminal.
+  const logToMain = (window as any).electronAPI?.logToMain;
+  logToMain?.('info', `[LLM] call ${config.provider}/${config.model} (${messages.length} msgs)`);
   switch (config.provider) {
     case 'gateway_ollama':
     case 'featherless':
@@ -661,10 +755,15 @@ export async function callLLM(messages: Message[], config: LLMConfig): Promise<L
       return callOpenClaw(messages, config);
     case 'openrouter':
       return callOpenRouter(messages, config);
+    case 'qwen':
+      return callQwen(messages, config);
     case 'custom':
       return callCustomEndpoint(messages, config);
-    default:
-      throw new Error(`Unsupported provider: ${config.provider}`);
+    default: {
+      const err = new Error(`Unsupported provider: ${config.provider}`);
+      logToMain?.('error', `[LLM] ${err.message}`);
+      throw err;
+    }
   }
 }
 
@@ -808,13 +907,18 @@ export interface FallbackStep {
   model: string;
   /** Provider key in apiKeys whose presence enables this fallback. Use
    *  'ollama' which is free and doesn't need a real key. */
-  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'none';
+  needsKey: 'minimax' | 'ollama' | 'anthropic' | 'openai' | 'openrouter' | 'gateway' | 'featherless' | 'qwen' | 'none';
   /** Custom endpoint override. For 'ollama' defaults to https://api.ollama.com. */
   endpoint?: string;
 }
 
 export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
+  // 2026-08-17 P0 fix — added Qwen 3.8 Max as the 2nd step so the
+  // fallback chain has a cheap vision-capable model before reaching the
+  // free Ollama tier. Order: MiniMax M3 (frontier) → Qwen 3.8 Max
+  // (PAYG, vision-capable, also handles screen capture) → Ollama free.
   { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
+  { provider: 'qwen', model: 'qwen3.8-max', needsKey: 'qwen', endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions' },
   { provider: 'ollama', model: 'deepseek-v4-pro', needsKey: 'none', endpoint: 'https://api.ollama.com' },
 ];
 
