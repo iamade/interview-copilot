@@ -21,6 +21,9 @@ const DEFAULT_SETTINGS: SettingsState = {
   engine: 'direct',
   visionProvider: 'qwen',
   visionModel: 'qwen-vl-max',
+  // Note: qwen-max (text frontier) is the production model on Token
+  // Plan. The old `qwen3.8-max` / `qwen3.5-plus` are NOT valid Token
+  // Plan ids and would 404 — see loadSettings migration.
   provider: 'anthropic',
   model: 'claude-sonnet-5',
   apiKeys: {},
@@ -187,16 +190,23 @@ export default function App() {
         // (e.g. 'claude-opus-5' was renamed to 'claude-opus-4-5-20251101'),
         // fall back to the first model for that provider so the app keeps working.
         // 2026-08-17 P0 fix — also handle the qwen case: if the stored
-        // model is `qwen3-max` (an old name) or anything not in the
-        // qwen catalog, fall back to `qwen3.8-max` (the production PAYG
-        // model on the Token Plan endpoint). Without this, the LLM
-        // service would 400 because qwen3-max doesn't exist on Token Plan.
+        // model is `qwen3-max` / `qwen3.8-max` / `qwen3.5-plus` (an old
+        // name from the pre-Token-Plan taxonomy) or anything not in
+        // the qwen catalog, fall back to `qwen-max` (the production
+        // frontier model on the Token Plan endpoint). Without this,
+        // the LLM service would 404 because those old model names
+        // don't exist on Token Plan.
         const validModels = PROVIDER_MODELS[storedProvider]?.models || [];
         const isValidModel = validModels.some((m) => m.id === storedModel);
         let resolvedModel = isValidModel ? storedModel : validModels[0]?.id || storedModel;
         if (storedProvider === 'qwen' && !isValidModel) {
-          // Force the production PAYG model name as the safe default.
-          resolvedModel = 'qwen3.8-max';
+          // 2026-08-17 — force the production Token Plan frontier
+          // model id as the safe default. The old `qwen3.8-max`,
+          // `qwen3.5-plus`, etc. are NOT valid Token Plan ids and
+          // would 404. `qwen-max` is the canonical frontier text
+          // model on the Token Plan endpoint.
+          resolvedModel = 'qwen-max';
+          api.setStore('llmModel', resolvedModel);
         }
         // 2026-08-17 — when migrating ollama → ollama_cloud, the bare
         // `deepseek-v4-pro` (old catalog) needs the `:cloud` suffix
@@ -667,6 +677,7 @@ RULES:
     <div
       data-overlay-ui
       className="w-full h-full flex flex-col bg-gray-950/[0.92] backdrop-blur-xl rounded-2xl border border-gray-800/60 shadow-2xl overflow-hidden"
+      style={{ scrollbarGutter: 'stable' }}
     >
       <OverlayHeader
         mode={mode}
@@ -686,7 +697,10 @@ RULES:
         }}
       />
 
-      <div className="flex-1 overflow-y-auto p-3 min-h-0" style={{ fontSize: settings.fontSize }}>
+      <div
+        className="flex-1 overflow-y-scroll p-3 min-h-0"
+        style={{ fontSize: settings.fontSize, scrollbarGutter: 'stable' }}
+      >
         {error && (
           <div className="mb-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded-lg text-red-400 text-xs fade-in">
             {error}

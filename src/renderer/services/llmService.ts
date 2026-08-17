@@ -219,12 +219,28 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
     // 2026-08-17 — moved from Direct API to OAuth / Token Plan
     // engine. Auth: Bearer with the sk-sp-... key from the Aliyun
     // Token Plan. Endpoint: token-plan.ap-southeast-1.maas.aliyuncs.com
-    // The DashScope PAYG endpoint (dashscope.aliyuncs.com) is a
-    // DIFFERENT model; this entry is for Token Plan only.
+    //
+    // The Token Plan supports these model ids (verified against
+    // Aliyun docs 2026-08-17):
+    //   - qwen-max             text, frontier
+    //   - qwen-max-latest      text, latest build
+    //   - qwen-plus            text, mid-tier
+    //   - qwen-plus-latest     text, latest
+    //   - qwen-turbo           text, fast
+    //   - qwen-vl-max          vision, frontier (Coding mode)
+    //   - qwen-vl-plus         vision, mid-tier
+    //
+    // Note: `qwen3.8-max` and `qwen3.5-plus` are NOT valid Token Plan
+    // ids. They were names from a previous app version. The 404
+    // error Ade hit on 2026-08-17 11:06 was because the stored model
+    // was `qwen3.8-max` — that id doesn't exist on the Token Plan
+    // endpoint. Migrated to `qwen-max` below.
     models: [
-      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (frontier · Token Plan)' },
+      { id: 'qwen-max', name: 'Qwen Max (frontier text · Token Plan)' },
       { id: 'qwen-vl-max', name: 'Qwen VL Max (vision · for Coding mode)' },
-      { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus' },
+      { id: 'qwen-plus', name: 'Qwen Plus (mid-tier)' },
+      { id: 'qwen-turbo', name: 'Qwen Turbo (fast · cheap)' },
+      { id: 'qwen-vl-plus', name: 'Qwen VL Plus (vision · mid-tier)' },
     ],
   },
   glm: {
@@ -1039,7 +1055,7 @@ export const DEFAULT_FALLBACK_CHAIN: FallbackStep[] = [
   { provider: 'gemini', model: 'gemini-2.5-flash', needsKey: 'gemini' },
   // Tier 2 — frontier reasoning (Interview mode / solve step):
   { provider: 'minimax', model: 'MiniMax-M3', needsKey: 'minimax' },
-  { provider: 'qwen', model: 'qwen3.8-max', needsKey: 'qwen', endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions' },
+  { provider: 'qwen', model: 'qwen-max', needsKey: 'qwen', endpoint: 'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions' },
   { provider: 'anthropic', model: 'claude-sonnet-5', needsKey: 'anthropic' },
   // Tier 3 — free:
   { provider: 'ollama_cloud', model: 'deepseek-v4-pro:cloud', needsKey: 'none', endpoint: 'https://api.ollama.com' },

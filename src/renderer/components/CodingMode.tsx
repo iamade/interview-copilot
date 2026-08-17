@@ -50,17 +50,37 @@ export default function CodingMode({
   fontSize,
 }: Props) {
   const [manualProblem, setManualProblem] = useState('');
-  const [showProblem, setShowProblem] = useState(true);
+  // 2026-08-17 — Problem Detected panel defaults to COLLAPSED. The
+  // user mostly cares about the solution, not the raw problem text.
+  // `highlightProblem` lights up the panel for 2s whenever a new
+  // problem is detected, so the user knows the AI received the
+  // question without the panel taking up space.
+  const [showProblem, setShowProblem] = useState(false);
+  const [highlightProblem, setHighlightProblem] = useState(false);
   const [showWindowPicker, setShowWindowPicker] = useState(false);
   const [windowList, setWindowList] = useState<WindowSource[]>([]);
   const [pickedWindowName, setPickedWindowName] = useState<string | null>(null);
   const solutionRef = useRef<HTMLDivElement>(null);
+  const lastProblemRef = useRef<string>('');
 
   useEffect(() => {
     if (solutionRef.current) {
       solutionRef.current.scrollTop = solutionRef.current.scrollHeight;
     }
   }, [codingSolution]);
+
+  // 2026-08-17 — when codingProblem changes, light up the Problem
+  // Detected panel for 2.5s then auto-collapse it. The user can still
+  // tap the panel to expand it manually (and it stays expanded until
+  // they collapse it).
+  useEffect(() => {
+    if (codingProblem && codingProblem !== lastProblemRef.current) {
+      lastProblemRef.current = codingProblem;
+      setHighlightProblem(true);
+      const t = setTimeout(() => setHighlightProblem(false), 2500);
+      return () => clearTimeout(t);
+    }
+  }, [codingProblem]);
 
   // 2026-08-17 P0 fix — pre-flight the macOS Screen Recording permission
   // the first time the user enters Coding mode so we can show a banner
@@ -277,14 +297,27 @@ export default function CodingMode({
         </button>
       </div>
 
-      {/* Problem display (collapsible) */}
+      {/* 2026-08-17 — Problem display: collapsed by default, lights up
+          when a NEW problem is detected. The user mostly cares about
+          the Solution; the raw problem text is reference. Auto-
+          collapses after 2.5s, and lights up amber for 2s whenever
+          the `codingProblem` prop changes (new capture or paste). */}
       {codingProblem && (
-        <div className="rounded-lg bg-gray-800/30 border border-gray-700/30 overflow-hidden fade-in">
+        <div
+          className={`rounded-lg overflow-hidden fade-in transition-all ${
+            highlightProblem
+              ? 'bg-amber-500/20 border border-amber-400/60 ring-1 ring-amber-400/30'
+              : 'bg-gray-800/30 border border-gray-700/30'
+          }`}
+        >
           <button
             onClick={() => setShowProblem(!showProblem)}
             className="w-full flex items-center justify-between px-3 py-1.5 text-[9px] text-orange-400 uppercase tracking-wider font-semibold hover:bg-gray-800/30 transition-all"
           >
-            <span>Problem Detected</span>
+            <span className="flex items-center gap-1.5">
+              {highlightProblem && <span className="w-1.5 h-1.5 rounded-full bg-amber-400 pulse-dot" />}
+              Problem Detected
+            </span>
             <span className="text-gray-600">{showProblem ? '▼' : '▶'}</span>
           </button>
           {showProblem && (
@@ -295,9 +328,12 @@ export default function CodingMode({
         </div>
       )}
 
-      {/* Solution display */}
+      {/* Solution display — must always have a visible scroll bar so
+          the user can scroll long solutions. The previous version had
+          overflow-y-auto but the parent was flex with no min-h-0, so
+          the inner pre was getting cropped. Fixed below. */}
       {(codingSolution || isGenerating) && (
-        <div className="flex-1 flex flex-col rounded-lg bg-gray-800/30 border border-purple-700/30 overflow-hidden fade-in">
+        <div className="flex-1 min-h-0 flex flex-col rounded-lg bg-gray-800/30 border border-purple-700/30 overflow-hidden fade-in">
           <div className="flex items-center justify-between px-3 py-1.5 border-b border-gray-700/20 bg-gray-800/20">
             <div className="flex items-center gap-2">
               <span className="text-[9px] text-purple-400 uppercase tracking-wider font-semibold">Solution</span>
@@ -306,8 +342,33 @@ export default function CodingMode({
             <div className="flex items-center gap-2">
               <span className="text-[9px] text-gray-600 px-1.5 py-0.5 rounded bg-gray-800/60">{programmingLanguage}</span>
               <button
-                onClick={() => {
-                  navigator.clipboard.writeText(codingSolution);
+                onClick={async () => {
+                  // 2026-08-17 — Electron's navigator.clipboard needs
+                  // the document to be focused; on first-click-after-
+                  // launch, the click is on the floating overlay
+                  // which may not be focused, so writeText fails with
+                  // NotAllowedError. Try a fallback: focus the body
+                  // first, then retry once.
+                  try {
+                    await navigator.clipboard.writeText(codingSolution);
+                  } catch (e: any) {
+                    try {
+                      window.focus();
+                      document.body.focus();
+                      await navigator.clipboard.writeText(codingSolution);
+                    } catch (e2: any) {
+                      // Last-resort: use the legacy execCommand which
+                      // works in Electron without focus.
+                      const ta = document.createElement('textarea');
+                      ta.value = codingSolution;
+                      ta.style.position = 'fixed';
+                      ta.style.opacity = '0';
+                      document.body.appendChild(ta);
+                      ta.select();
+                      try { document.execCommand('copy'); } catch (_) { /* ignore */ }
+                      document.body.removeChild(ta);
+                    }
+                  }
                 }}
                 className="text-[9px] text-gray-500 hover:text-gray-300 transition-all"
                 title="Copy solution"
@@ -318,8 +379,8 @@ export default function CodingMode({
           </div>
           <div
             ref={solutionRef}
-            className="flex-1 overflow-y-auto px-3 py-2 text-gray-200 leading-relaxed"
-            style={{ fontSize: Math.max(fontSize - 1, 11) }}
+            className="flex-1 min-h-0 overflow-y-scroll px-3 py-2 text-gray-200 leading-relaxed"
+            style={{ fontSize: Math.max(fontSize - 1, 11), scrollbarGutter: 'stable' }}
           >
             <pre className="whitespace-pre-wrap">
               <code>{codingSolution}</code>
