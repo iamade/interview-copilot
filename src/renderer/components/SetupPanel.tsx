@@ -145,6 +145,54 @@ export default function SetupPanel({
     onUpdateContext({ ...userContext, prepDocs: userContext.prepDocs.filter((_, i) => i !== index) });
   }
 
+  // 2026-08-17 — "Reset for new interview" wipes the per-interview prep
+  // data (resume, JD, stories, prep docs, company, role, notes) but
+  // leaves the LLM settings (provider, model, API keys) alone. The
+  // previous UX persisted Laivly-specific data between sessions, so
+  // every new interview started with stale content in the fields. Now
+  // the user clicks one button → all interview-specific fields are
+  // blank and ready for the next company's content.
+  function handleResetForNewInterview() {
+    const hasData =
+      !!userContext.resumeText ||
+      !!userContext.jobDescription ||
+      !!userContext.stories ||
+      userContext.prepDocs.length > 0 ||
+      !!userContext.companyName ||
+      !!userContext.roleName ||
+      !!userContext.additionalNotes;
+    if (!hasData) return; // nothing to clear
+    const ok = window.confirm(
+      'Reset all interview prep data?\n\n' +
+      'This will clear:\n' +
+      '  • Company & Role\n' +
+      '  • Resume\n' +
+      '  • Job Description\n' +
+      '  • Stories\n' +
+      '  • Prep Docs\n' +
+      '  • Additional Notes\n\n' +
+      'Your LLM settings (provider, model, API keys) are kept.\n\n' +
+      'Continue?'
+    );
+    if (!ok) return;
+    onUpdateContext({
+      ...userContext,
+      resumeText: '',
+      jobDescription: '',
+      stories: '',
+      prepDocs: [],
+      companyName: '',
+      roleName: '',
+      additionalNotes: '',
+    });
+    // Persist immediately so a hard quit doesn't leave the old data in the store.
+    const api = window.electronAPI;
+    api?.setStore?.('resumeText', '');
+    api?.setStore?.('jobDescription', '');
+    api?.setStore?.('stories', '');
+    api?.setStore?.('prepDocs', []);
+  }
+
   async function extractDocxText(file: File): Promise<string> {
     // Read DOCX as ArrayBuffer, find document.xml in the zip, strip XML tags
     const arrayBuffer = await file.arrayBuffer();
@@ -259,6 +307,22 @@ export default function SetupPanel({
 
       {activeTab === 'context' && (
         <div className="flex flex-col gap-2">
+          {/* 2026-08-17 — "Reset for new interview" button. Wipes the
+              per-interview prep data so the user can start fresh
+              without re-pasting/uploading the same fields one by one. */}
+          <div className="flex items-center justify-between px-2 py-1 rounded-lg bg-amber-500/5 border border-amber-500/20">
+            <span className="text-[9px] text-amber-300/80">
+              Prep data from the last interview is still loaded.
+            </span>
+            <button
+              onClick={handleResetForNewInterview}
+              className="text-[9px] text-amber-300 hover:text-amber-200 underline underline-offset-2 transition-all shrink-0 ml-2"
+              title="Clear resume, job description, stories, prep docs, company, role, and notes. LLM settings are kept."
+            >
+              Reset for new interview
+            </button>
+          </div>
+
           {/* Company & Role */}
           <div className="grid grid-cols-2 gap-2">
             <div>
