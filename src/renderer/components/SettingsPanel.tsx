@@ -3,21 +3,23 @@ import type { SettingsState, UserContext } from '../types';
 import type { LLMProvider } from '../services/llmService';
 import { PROVIDER_MODELS } from '../services/llmService';
 
-// 2026-08-17 — engine quick-select: just OAuth/Gateway vs Direct API.
-// The user wanted only 2 options (not 3) since the previous 3-option
-// "Ollama / GLM 5.1 / Direct API" layout was confusing — the new
-// design treats Ollama and GLM as just providers under the OAuth
-// bucket, not engines of their own.
+// 2026-08-17 — engine quick-select: OAuth / Token Plan vs Direct API.
+// Per Ade 11:05 MDT: the OAuth engine is specifically for providers
+// that issue a token via a subscription / plan (Qwen Token Plan,
+// Ollama Cloud credits, OpenRouter credits, Featherless). Direct
+// API is for BYO API key from the provider's dashboard, or for
+// talking to a local daemon. Qwen moved from Direct to OAuth
+// because its auth model is a Token Plan (sk-sp-… key).
 const ENGINES: { key: 'oauth' | 'direct'; label: string; sub: string }[] = [
   {
     key: 'oauth',
-    label: 'OAuth / Gateway',
-    sub: 'OpenClaw-managed keys (Ollama, OpenRouter, Featherless, HF). Free tier available.',
+    label: 'OAuth / Token Plan',
+    sub: 'Plan-based tokens (Qwen Token Plan, Ollama Cloud, OpenRouter, Featherless).',
   },
   {
     key: 'direct',
     label: 'Direct API',
-    sub: "Provider's own key (Anthropic, OpenAI, Gemini, Qwen, GLM, Kimi). PAYG.",
+    sub: "BYO API key (Anthropic, OpenAI, Gemini, GLM, Kimi, MiniMax, PiAPI, Custom) or local Ollama daemon.",
   },
 ];
 
@@ -44,11 +46,14 @@ export function EngineSelector({
                 let newProvider: LLMProvider = settings.provider;
                 let newModel: string = settings.model;
                 if (e.key === 'oauth') {
-                  // Switch to ollama_cloud + free deepseek-v4-pro
-                  newProvider = 'ollama_cloud';
-                  newModel = 'deepseek-v4-pro:cloud';
+                  // OAuth / Token Plan engine: default to Qwen Token
+                  // Plan (the canonical token-plan example per Ade
+                  // 11:05 MDT). Use qwen-vl-max for vision capability
+                  // (Coding mode can read LeetCode with it directly).
+                  newProvider = 'qwen';
+                  newModel = 'qwen-vl-max';
                 } else {
-                  // Switch to anthropic + claude-sonnet-5
+                  // Direct API: default to Anthropic + claude-sonnet-5
                   newProvider = 'anthropic';
                   newModel = 'claude-sonnet-5';
                 }

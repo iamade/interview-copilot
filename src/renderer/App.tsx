@@ -206,14 +206,22 @@ export default function App() {
           api.setStore('llmModel', resolvedModel);
         }
 
-        // 2026-08-17 — engine = oauth or direct. Default to direct so
-        // the user explicitly opts in to OAuth providers.
+        // 2026-08-17 — engine = oauth (token plan) or direct (PAYG
+        // / local). Migrate stored providers to the correct engine:
+        // qwen moved to oauth (Token Plan), ollama_local moved to
+        // direct (it's a local daemon, not a plan), and the rest of
+        // the oauth bucket stays oauth.
         const storedEngine: 'oauth' | 'direct' = (() => {
           if (stored.engine === 'oauth' || stored.engine === 'direct') return stored.engine;
-          // Infer from the legacy provider name
-          if (['ollama_cloud', 'ollama_local', 'openrouter', 'featherless'].includes(storedProvider)) return 'oauth';
+          // Infer from the provider name using the new taxonomy
+          if (['ollama_cloud', 'openrouter', 'featherless', 'qwen'].includes(storedProvider)) return 'oauth';
           return 'direct';
         })();
+        // If the inferred engine doesn't match the provider, persist
+        // the new engine so subsequent loads are consistent.
+        if (stored.engine !== storedEngine) {
+          api.setStore('engine', storedEngine);
+        }
 
         setSettings((prev) => ({
           ...prev,

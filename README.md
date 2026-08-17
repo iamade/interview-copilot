@@ -320,7 +320,13 @@ dist/
    - Company + role (helps the LLM calibrate).
 3. Go to **Settings** and pick your LLM provider + model. The default
    is Anthropic Claude Sonnet 5; switch to a cheaper model for
-   practice rounds.
+   practice rounds. There are two engines:
+   - **OAuth / Token Plan** — plan-based providers where you buy a
+     plan and receive a token (Qwen Token Plan, Ollama Cloud,
+     OpenRouter, Featherless).
+   - **Direct API** — BYO API key from the provider's dashboard, or
+     talk to a local Ollama daemon (Anthropic, OpenAI, Gemini, GLM,
+     Kimi, MiniMax, PiAPI, Custom, Ollama Local).
 
 ### During an interview
 

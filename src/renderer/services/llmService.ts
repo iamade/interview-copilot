@@ -17,12 +17,45 @@ export type LLMProvider =
   | 'piapi'             // direct
   | 'custom';           // direct, user-configured endpoint
 
-// 2026-08-17 — engine classification. OAuth providers use
-// OpenClaw-managed keys (OLLAMA_API_KEY, OPENROUTER_API_KEY, etc.) and
-// hit the public providers' standard endpoints. Direct providers use
-// the provider's own API key and hit the provider's native endpoint.
-export const OAUTH_PROVIDERS: LLMProvider[] = ['ollama_cloud', 'ollama_local', 'openrouter', 'featherless'];
-export const DIRECT_PROVIDERS: LLMProvider[] = ['anthropic', 'minimax', 'openai', 'gemini', 'qwen', 'glm', 'kimi', 'piapi', 'custom'];
+// 2026-08-17 — engine classification.
+//
+//   OAuth / Token Plan engine: providers where you BUY A PLAN and
+//   receive a token (sk-sp-..., ollama_..., openrouter_..., etc.)
+//   that the app uses for all calls. The plan = subscription = your
+//   "OAuth" auth. Examples: Qwen Token Plan (Aliyun), Ollama Cloud,
+//   OpenRouter credits, Featherless. These hit the provider's
+//   plan-authenticated endpoint with a Bearer token.
+//
+//   Direct API engine: providers where you BYO (bring-your-own)
+//   per-call API key from the provider's dashboard, OR talk to a
+//   local daemon. PAYG billing per token, or no billing at all for
+//   local. Examples: Anthropic, OpenAI, Gemini, GLM, Kimi, MiniMax,
+//   PiAPI, Custom, Ollama Local (localhost daemon, no key needed).
+//
+// Ade 2026-08-17 11:05 MDT: "all providers should be under direct api
+// engine, while OAuth / Gateway engine: should be for providers that
+// give token plans like qwen so qwen should also be under OAuth /
+// Gateway engine/ token plan". Qwen moved from Direct to OAuth/Token
+// Plan because its auth model is exactly that — a Token Plan (sk-sp-…
+// key issued by the Aliyun plan). Ollama Local moved from OAuth to
+// Direct because it's a local daemon, not a token plan.
+export const OAUTH_PROVIDERS: LLMProvider[] = [
+  'ollama_cloud',
+  'openrouter',
+  'featherless',
+  'qwen',        // Aliyun Token Plan (sk-sp-... key on token-plan endpoint)
+];
+export const DIRECT_PROVIDERS: LLMProvider[] = [
+  'ollama_local', // local daemon at ollamaLocalEndpoint, no key
+  'anthropic',
+  'minimax',
+  'openai',
+  'gemini',
+  'glm',
+  'kimi',
+  'piapi',
+  'custom',
+];
 
 export function isOAuthProvider(p: LLMProvider): boolean { return OAUTH_PROVIDERS.includes(p); }
 export function isDirectProvider(p: LLMProvider): boolean { return DIRECT_PROVIDERS.includes(p); }
@@ -182,11 +215,14 @@ export const PROVIDER_MODELS: Record<LLMProvider, { label: string; models: { id:
     ],
   },
   qwen: {
-    label: 'Qwen (Aliyun Token Plan)',
-    // OpenAI-compatible at token-plan.ap-southeast-1.maas.aliyuncs.com.
-    // Auth: Bearer with the sk-sp-... key.
+    label: 'Qwen Token Plan (Aliyun)',
+    // 2026-08-17 — moved from Direct API to OAuth / Token Plan
+    // engine. Auth: Bearer with the sk-sp-... key from the Aliyun
+    // Token Plan. Endpoint: token-plan.ap-southeast-1.maas.aliyuncs.com
+    // The DashScope PAYG endpoint (dashscope.aliyuncs.com) is a
+    // DIFFERENT model; this entry is for Token Plan only.
     models: [
-      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (PAYG · frontier)' },
+      { id: 'qwen3.8-max', name: 'Qwen 3.8 Max (frontier · Token Plan)' },
       { id: 'qwen-vl-max', name: 'Qwen VL Max (vision · for Coding mode)' },
       { id: 'qwen3.5-plus', name: 'Qwen 3.5 Plus' },
     ],
