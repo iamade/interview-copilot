@@ -380,7 +380,12 @@ export default function CodingMode({
           <div
             ref={solutionRef}
             className="flex-1 min-h-0 overflow-y-scroll px-3 py-2 text-gray-200 leading-relaxed"
-            style={{ fontSize: Math.max(fontSize - 1, 11), scrollbarGutter: 'stable' }}
+            style={{
+              fontSize: Math.max(fontSize - 1, 11),
+              scrollbarGutter: 'stable',
+              scrollbarColor: 'rgba(255,255,255,0.5) rgba(255,255,255,0.05)',
+              scrollbarWidth: 'thin',
+            }}
           >
             <pre className="whitespace-pre-wrap">
               <code>{codingSolution}</code>

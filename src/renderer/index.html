@@ -9,10 +9,11 @@
   <style>
     * { font-family: 'Inter', sans-serif; }
     body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-    ::-webkit-scrollbar { width: 8px; height: 8px; }
-    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.04); }
-    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.25); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
+    ::-webkit-scrollbar { width: 12px; height: 12px; }
+    ::-webkit-scrollbar-track { background: rgba(255,255,255,0.04); border-radius: 6px; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.4); border-radius: 6px; border: 2px solid transparent; background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.6); background-clip: padding-box; }
+    ::-webkit-scrollbar-thumb:active { background: rgba(180,140,255,0.7); background-clip: padding-box; }
     ::-webkit-scrollbar-corner { background: transparent; }
     .drag-region { -webkit-app-region: drag; }
     .no-drag { -webkit-app-region: no-drag; }

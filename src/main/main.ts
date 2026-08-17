@@ -441,19 +441,33 @@ ipcMain.handle('fetch:proxy', async (_event, url: string, options: {
         data = { raw: rawText, parseError: parseErr.message };
       }
     } else {
-      // Try to parse the error body as JSON; fall back to wrapping
-      // the raw text so the user sees the real API error message
-      // (Qwen/Anthropic/OpenAI all return JSON error bodies, but
-      // some intermediaries return plain text).
+      // 2026-08-17 P0 fix — handle the case where the API returns
+      // {"error": "Unauthorized"} (Ollama does this) where `error`
+      // is a STRING, not an object. The previous code assumed
+      // `errBody.error` was always an object and crashed with
+      // "Cannot create property 'message' on string 'Unauthorized'"
+      // when trying to set `.message` on the string. Now we
+      // normalize: if `error` is a string, wrap it in {message: ...};
+      // if it's an object, keep it; if missing, create a default.
       let errBody: any;
       try {
         errBody = JSON.parse(rawText);
       } catch {
+        // Body wasn't JSON at all — wrap the raw text.
         errBody = { error: { message: rawText.slice(0, 500) } };
       }
-      // Make sure the error shape has a message.
-      if (!errBody.error) errBody = { error: { message: rawText.slice(0, 500) } };
-      if (!errBody.error.message) errBody.error.message = `HTTP ${response.status}`;
+      // Normalize errBody.error into the {message, ...} shape.
+      if (typeof errBody.error === 'string') {
+        // Ollama-style: {"error": "Unauthorized"} — error is a string.
+        errBody = { error: { message: errBody.error } };
+      } else if (!errBody.error || typeof errBody.error !== 'object') {
+        // No error field, or error is null/number/etc.
+        errBody = { error: { message: rawText.slice(0, 500) } };
+      } else if (typeof errBody.error.message !== 'string') {
+        // Error is an object but lacks a message — fall back to
+        // raw text so the user sees SOMETHING.
+        errBody.error.message = rawText.slice(0, 500);
+      }
       errBody.error.raw = rawText.slice(0, 2000);
       errBody.error.status = response.status;
       data = errBody;

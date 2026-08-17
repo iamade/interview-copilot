@@ -17,36 +17,35 @@ export type LLMProvider =
   | 'piapi'             // direct
   | 'custom';           // direct, user-configured endpoint
 
-// 2026-08-17 — engine classification.
+// 2026-08-17 11:55 MDT — engine classification (per Ade 11:55).
 //
-//   OAuth / Token Plan engine: providers where you BUY A PLAN and
-//   receive a token (sk-sp-..., ollama_..., openrouter_..., etc.)
-//   that the app uses for all calls. The plan = subscription = your
-//   "OAuth" auth. Examples: Qwen Token Plan (Aliyun), Ollama Cloud,
-//   OpenRouter credits, Featherless. These hit the provider's
-//   plan-authenticated endpoint with a Bearer token.
+//   OAuth / Token Plan engine: ONLY for providers with a dedicated
+//   "plan" model where the auth token is the plan itself. Qwen
+//   Token Plan (Aliyun) is the canonical example — you buy the
+//   plan, you get a sk-sp-... key, you use it on the
+//   token-plan.ap-southeast-1.maas.aliyuncs.com endpoint.
 //
-//   Direct API engine: providers where you BYO (bring-your-own)
-//   per-call API key from the provider's dashboard, OR talk to a
-//   local daemon. PAYG billing per token, or no billing at all for
-//   local. Examples: Anthropic, OpenAI, Gemini, GLM, Kimi, MiniMax,
-//   PiAPI, Custom, Ollama Local (localhost daemon, no key needed).
+//   Direct API engine: every other provider. They all use API keys
+//   (BYO from the dashboard, or seeded from .env via the main
+//   process). Includes Ollama Cloud (uses OLLAMA_API_KEY),
+//   OpenRouter (OPENROUTER_API_KEY), Featherless, Ollama Local
+//   (no key — talks to a local daemon), and the standard PAYG
+//   providers (Anthropic, OpenAI, Gemini, GLM, Kimi, MiniMax,
+//   PiAPI, Custom).
 //
-// Ade 2026-08-17 11:05 MDT: "all providers should be under direct api
-// engine, while OAuth / Gateway engine: should be for providers that
-// give token plans like qwen so qwen should also be under OAuth /
-// Gateway engine/ token plan". Qwen moved from Direct to OAuth/Token
-// Plan because its auth model is exactly that — a Token Plan (sk-sp-…
-// key issued by the Aliyun plan). Ollama Local moved from OAuth to
-// Direct because it's a local daemon, not a token plan.
+// Ade 11:55: "i also noticed ollama cloud is not under direct api
+// keys as well, i need API keys to use ollama cloud". All providers
+// that need an API key (i.e. ALL of them, including Ollama Cloud,
+// OpenRouter, Featherless) go under Direct API. Only Qwen Token
+// Plan stays in OAuth/Token Plan.
 export const OAUTH_PROVIDERS: LLMProvider[] = [
-  'ollama_cloud',
-  'openrouter',
-  'featherless',
-  'qwen',        // Aliyun Token Plan (sk-sp-... key on token-plan endpoint)
+  'qwen',  // Aliyun Token Plan (sk-sp-... key on token-plan endpoint)
 ];
 export const DIRECT_PROVIDERS: LLMProvider[] = [
-  'ollama_local', // local daemon at ollamaLocalEndpoint, no key
+  'ollama_cloud',
+  'ollama_local',
+  'openrouter',
+  'featherless',
   'anthropic',
   'minimax',
   'openai',
